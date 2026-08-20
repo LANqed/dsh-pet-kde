@@ -41,6 +41,15 @@ def test_default_character_categories_match_original_asset_set():
     assert len(categories["acts"]) == 42
 
 
+def test_locked_config_persists(tmp_path: Path):
+    from pet.config import Config
+
+    config = Config(tmp_path)
+    config.set("locked", True)
+    config.save()
+    assert Config(tmp_path).get("locked") is True
+
+
 def test_kde_wayland_uses_xwayland():
     env = {
         "XDG_CURRENT_DESKTOP": "KDE",

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from . import autostart as autostart_mod
 from . import catalog
+from . import x11_hints
 from .config import Config
 from .library import MovieLibrary
 
@@ -93,19 +94,26 @@ class PetWindow(QWidget):
         self.clicks = self.cats['clicks']
         self.drag = self.cats['drag']
         self.acts = self.cats['acts']
+        self.locked = bool(config.get('locked', False))
 
         # 预载拖拽动画首帧，避免第一次进入拖拽状态时同步解码卡顿
         if self.drag:
             self.lib.movie(self.drag).jumpToFrame(0)
 
         # ---- 窗口属性：无边框 + 透明 + 不进任务栏；置顶可配置 ----
+        # WindowDoesNotAcceptFocus 在 X11/XWayland 下同时设置
+        # _NET_WM_STATE_SKIP_TASKBAR 与 _NET_WM_STATE_SKIP_PAGER，
+        # 让 KDE 任务管理器/底部 dock 不显示桌宠图标（Tool 类型默认仍可能被显示）。
         flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
             | Qt.WindowType.NoDropShadowWindowHint
         )
         if config.get('on_top', True):
             flags |= Qt.WindowType.WindowStaysOnTopHint
+        if self.locked:
+            flags |= Qt.WindowType.WindowTransparentForInput
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
@@ -233,6 +241,10 @@ class PetWindow(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         """窗口显示时校正层级（延迟执行，避免被 Qt 窗口重建覆盖）。"""
         super().showEvent(event)
+        if sys.platform.startswith('linux'):
+            # KDE 任务管理器/底部 dock 不显示桌宠：X11/XWayland 下显式请求跳过任务栏。
+            # setWindowFlag 重建原生窗口后 XID 变化，故每次显示都重新应用。
+            QTimer.singleShot(0, lambda: x11_hints.skip_taskbar(int(self.winId())))
         if sys.platform == 'darwin':
             on = bool(self.cfg.get('on_top', True))
             QTimer.singleShot(0, lambda: _mac_set_window_level(int(self.winId()), 3 if on else 0))
@@ -245,6 +257,24 @@ class PetWindow(QWidget):
         if self.no_move and self._move_plan is not None:
             if self.idles:
                 self._switch(self._pick(self.idles))  # 打断进行中的移动
+
+    def set_locked(self, on: bool) -> None:
+        """锁定后窗口完全鼠标穿透，只能通过系统托盘解锁。"""
+        on = bool(on)
+        if on == self.locked:
+            return
+        self.locked = on
+        self._press_global = None
+        self._grab_offset = None
+        self._dragging = False
+        self.cfg.set('locked', on)
+        self.cfg.save()
+        was_visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, on)
+        if was_visible:
+            self.show()
+            if self.cfg.get('on_top', True):
+                self.raise_()
 
     # ================================================================ 播放
     def _switch(self, name: str) -> None:
@@ -526,7 +556,20 @@ class PetWindow(QWidget):
         self._cancel_move()
         self._switch(self._pick(self.clicks))
 
+    def _is_character_pixel(self, point: QPoint) -> bool:
+        """当前窗口坐标是否落在角色可见像素上。"""
+        if self._frame_pixmap is None:
+            return False
+        y = point.y() - int(round(catalog.PAD * self.scale))
+        x = point.x()
+        if x < 0 or y < 0 or x >= self._frame_pixmap.width() or y >= self._frame_pixmap.height():
+            return False
+        return self._frame_pixmap.toImage().pixelColor(x, y).alpha() >= 8
+
     def contextMenuEvent(self, event) -> None:  # noqa: N802
+        if self.locked or not self._is_character_pixel(event.pos()):
+            event.ignore()
+            return
         menu = QMenu(self)
 
         if self.idles:
@@ -570,6 +613,9 @@ class PetWindow(QWidget):
         no_move.setCheckable(True)
         no_move.setChecked(self.no_move)
         no_move.toggled.connect(self.set_no_move)
+
+        lock = menu.addAction('锁定并穿透鼠标')
+        lock.triggered.connect(lambda checked=False: self.set_locked(True))
 
         auto = menu.addAction('开机自启')
         auto.setCheckable(True)

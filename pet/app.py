@@ -169,6 +169,11 @@ class PetApp:
         menu = QMenu()
         menu.addAction('显示 / 隐藏', toggle_visible)
 
+        locked = menu.addAction('锁定（鼠标穿透）')
+        locked.setCheckable(True)
+        locked.setChecked(win.locked)
+        locked.toggled.connect(win.set_locked)
+
         m_char = menu.addMenu('切换角色')
         current = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
         for cid in catalog.list_available_characters():

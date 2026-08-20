@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from . import autostart as autostart_mod
 from . import catalog
 from .config import Config
+from .kde import configure_platform
 from .library import MovieLibrary
 from .window import PetWindow
 
@@ -76,6 +77,11 @@ class PetApp:
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
         character_id = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
+        available = catalog.list_available_characters()
+        if character_id not in available and available:
+            character_id = catalog.DEFAULT_CHARACTER if catalog.DEFAULT_CHARACTER in available else available[0]
+            self.config.set('character', character_id)
+            self.config.save()
         logging.info('当前形象: %s', character_id)
         self._create_ui(character_id)
 
@@ -193,6 +199,7 @@ class PetApp:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_platform()
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName('dsh-pet-standalone')
     app.setQuitOnLastWindowClosed(False)

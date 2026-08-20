@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
 
 # 运行时产物
 tmp_appdata/

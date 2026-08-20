@@ -62,12 +62,17 @@ def main() -> int:
     assert idle.currentFrameNumber() >= 1
     idle.stop()
 
-    # 4. 窗口实例化：尺寸/初始动画/透明 mask
+    # 4. 窗口实例化：尺寸/初始动画/透明窗口
     cfg = Config(base=os.path.join(os.path.dirname(os.path.abspath(__file__)), "_tmp_cfg"))
     win = PetWindow(lib, cfg)
     win.show()
     assert win.anim == catalog.IDLE
-    assert win.mask() is not None and not win.mask().isNull()
+    if win._use_native_mask:
+        assert win.mask() is not None and not win.mask().isNull()
+    else:
+        # KWin/XWayland gets an unshaped translucent surface to avoid black
+        # rectangles and stale first-frame outlines in its shape compositor.
+        assert win.mask().isNull()
     assert win.width() == int(round(catalog.CANVAS_W * win.scale))
     assert win.height() == int(round((catalog.CANVAS_H + catalog.PAD) * win.scale))
 

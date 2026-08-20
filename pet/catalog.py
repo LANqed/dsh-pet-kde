@@ -56,8 +56,7 @@ SCALE_STEPS = (0.5, 0.72, 0.85, 1.0)
 
 # ---------------------------------------------------------------- 多形象
 # 当前内置形象与未来扩展形象 ID（目录名建议使用稳定 ASCII）
-DEFAULT_CHARACTER = 'shenshen'
-CHARACTERS = ('shenshen',)
+DEFAULT_CHARACTER = 'deepseek-tan'
 MANIFEST_FILENAME = 'manifest.json'
 # videos 下的分类子目录
 DIR_IDLE = 'idle'
@@ -141,8 +140,8 @@ assert len(ACTS) == 42, f"动作池应为 42，实际 {len(ACTS)}"
 
 
 def assets_dir() -> Path:
-    """兼容旧调用：默认形象 shenshen 的 webm 素材目录。"""
-    return webm_dir()
+    """兼容旧调用：默认形象的 WebM 素材目录。"""
+    return resolve_character_video_dir(DEFAULT_CHARACTER)
 
 
 def characters_dir() -> Path:
@@ -153,6 +152,23 @@ def characters_dir() -> Path:
 def character_video_dir(character_id: str) -> Path:
     """内置某个形象的 webm 目录：assets/characters/<id>/videos。"""
     return characters_dir() / character_id / 'videos'
+
+
+def built_in_characters() -> list[str]:
+    """扫描 assets/characters 下包含 WebM 素材的内置角色。"""
+    root = characters_dir()
+    if not root.is_dir():
+        return []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    return [
+        child.name for child in entries
+        if child.is_dir()
+        and (child / 'videos').is_dir()
+        and any((child / 'videos').rglob('*.webm'))
+    ]
 
 
 def external_character_dirs() -> list[Path]:
@@ -185,7 +201,15 @@ def resolve_character_video_dir(character_id: str) -> Path:
         candidate = root / character_id / 'videos'
         if candidate.is_dir():
             return candidate
-    return character_video_dir(character_id)
+    built_in = character_video_dir(character_id)
+    if built_in.is_dir():
+        return built_in
+    # 兼容上游仓库的扁平 assets/thumb/*.webm 布局。
+    if character_id == DEFAULT_CHARACTER:
+        legacy = Path(__file__).resolve().parent.parent / 'assets' / 'thumb'
+        if legacy.is_dir():
+            return legacy
+    return built_in
 
 
 def list_available_characters() -> list[str]:
@@ -193,7 +217,9 @@ def list_available_characters() -> list[str]:
 
     外部目录不存在时静默跳过，不会报错。
     """
-    ids: list[str] = list(CHARACTERS)
+    ids = built_in_characters()
+    if not ids and character_video_dir(DEFAULT_CHARACTER).is_dir():
+        ids = [DEFAULT_CHARACTER]
     seen = set(ids)
     for root in external_character_dirs():
         if not root.is_dir():
@@ -213,8 +239,8 @@ def list_available_characters() -> list[str]:
 
 
 def webm_dir() -> Path:
-    """默认形象 shenshen 的 webm 素材目录（兼容旧调用）。"""
-    return character_video_dir(DEFAULT_CHARACTER)
+    """默认形象的 WebM 素材目录（兼容旧调用）。"""
+    return resolve_character_video_dir(DEFAULT_CHARACTER)
 
 
 def legacy_assets_dir() -> Path:

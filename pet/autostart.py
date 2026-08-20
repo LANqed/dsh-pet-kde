@@ -4,7 +4,7 @@
 
 - Windows：HKCU Run 注册表键（无需管理员权限）；
 - macOS：LaunchAgents plist（~/Library/LaunchAgents/）；
-- 其他平台：no-op（返回 False / 不操作）。
+- Linux：XDG autostart desktop 文件（~/.config/autostart/）。
 
 设计原则：**系统自启配置是唯一真相**。菜单勾选状态直接查它们，不与 config.json
 冗余存储，避免两处状态不同步。
@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 _IS_WIN = sys.platform == "win32"
 _IS_MAC = sys.platform == "darwin"
+_IS_LINUX = sys.platform.startswith("linux")
 
 if _IS_WIN:
     import winreg
@@ -37,6 +39,11 @@ def _project_root() -> Path:
 
 def _plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{APP_ID}.plist"
+
+
+def _desktop_path() -> Path:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return config_home / "autostart" / f"{APP_ID}.desktop"
 
 
 def _pythonw_path() -> str:
@@ -80,6 +87,8 @@ def is_enabled() -> bool:
             return False
     if _IS_MAC:
         return _plist_path().exists()
+    if _IS_LINUX:
+        return _desktop_path().exists()
     return False
 
 
@@ -101,6 +110,32 @@ def _mac_program_args() -> list[str]:
     return [sys.executable, "-m", "pet"]
 
 
+def _desktop_quote(value: str) -> str:
+    """Quote one argument according to the Desktop Entry Exec field rules."""
+    escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+    escaped = escaped.replace('`', '\\`').replace('$', '\\$')
+    return f'"{escaped}"'
+
+
+def _linux_desktop_entry() -> str:
+    if getattr(sys, "frozen", False):
+        command = _desktop_quote(str(Path(sys.executable).resolve()))
+        working_dir = str(Path(sys.executable).resolve().parent)
+    else:
+        command = f"{_desktop_quote(sys.executable)} -m pet"
+        working_dir = str(_project_root())
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=dsh-pet\n"
+        "Comment=Desktop pet for KDE Plasma\n"
+        f"Exec={command}\n"
+        f"Path={working_dir}\n"
+        "Terminal=false\n"
+        "X-KDE-autostart-after=panel\n"
+    )
+
+
 def enable() -> None:
     if _IS_WIN:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
@@ -118,6 +153,10 @@ def enable() -> None:
             plist["WorkingDirectory"] = str(_project_root())
         with _plist_path().open("wb") as f:
             plistlib.dump(plist, f)
+    elif _IS_LINUX:
+        path = _desktop_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_linux_desktop_entry(), encoding="utf-8")
 
 
 def disable() -> None:
@@ -129,6 +168,8 @@ def disable() -> None:
             pass
     elif _IS_MAC:
         _plist_path().unlink(missing_ok=True)
+    elif _IS_LINUX:
+        _desktop_path().unlink(missing_ok=True)
 
 
 def set_enabled(on: bool) -> None:

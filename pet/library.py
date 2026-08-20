@@ -16,8 +16,6 @@ WebMClip 基于 imageio-ffmpeg 解码 640×360 透明 webm（RGBA）。
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-import threading
 from pathlib import Path
 from typing import Mapping
 
@@ -46,8 +44,8 @@ class MovieLibrary(QObject):
             self._asset_dir = catalog.resolve_character_video_dir(self.character_id)
         self._manifest = None if manifest is None else dict(manifest)
         self.manifest = catalog.load_character_manifest(self.character_id, self._asset_dir)
-        self.folder_map: dict[str, str] = {}
-        self.folder_files: dict[str, list[str]] = {}
+        self.folder_map: dict[str, str] | None = {}
+        self.folder_files: dict[str, list[str]] | None = {}
         self._movies: dict[str, WebMClip] = {}
 
         self._load_all()
@@ -67,6 +65,7 @@ class MovieLibrary(QObject):
             self._manifest = {}
             self.folder_map = {}
             self.folder_files = {}
+            has_subdirectories = any(len(f.relative_to(self._asset_dir).parts) > 1 for f in files)
             for f in files:
                 rel = f.relative_to(self._asset_dir)
                 name = f.stem
@@ -74,6 +73,10 @@ class MovieLibrary(QObject):
                 folder = rel.parts[0].lower() if len(rel.parts) > 1 else ''
                 self.folder_map[name] = folder
                 self.folder_files.setdefault(folder, []).append(name)
+            if not has_subdirectories:
+                # Flat upstream assets/thumb layout should use keyword classification.
+                self.folder_map = None
+                self.folder_files = None
 
         missing: list[str] = []
         resolved: dict[str, Path] = {}
@@ -89,19 +92,6 @@ class MovieLibrary(QObject):
 
         for name, path in resolved.items():
             self._movies[name] = WebMClip(path, parent=self)
-
-        # 后台并行预热元数据，不阻塞启动/切角色
-        if self._movies:
-            threading.Thread(target=self._warm_all_meta_background, daemon=True).start()
-
-    def _warm_all_meta_background(self) -> None:
-        try:
-            workers = min(8, len(self._movies))
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                list(ex.map(lambda clip: clip.warm_meta(), list(self._movies.values())))
-        except Exception:
-            # 预热失败不致命，后续按需读取时会再尝试
-            pass
 
     def movie(self, name: str) -> WebMClip:
         return self._movies[name]

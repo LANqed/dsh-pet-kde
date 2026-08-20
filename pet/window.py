@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import random
 import sys
 
@@ -76,6 +77,11 @@ class PetWindow(QWidget):
         self.lib = lib
         self.cfg = config
         self.on_switch_character = None  # 由 app 注入，用于运行时切换角色
+        desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+        self._use_native_mask = not (
+            sys.platform.startswith('linux')
+            and ('kde' in desktop or os.environ.get('KDE_FULL_SESSION'))
+        )
 
         # 根据当前形象实际拥有的动画动态计算分类，支持不同角色动作不一致
         self.cats = catalog.build_categories(lib.names(), getattr(lib, 'manifest', None), getattr(lib, 'folder_map', None), getattr(lib, 'folder_files', None))
@@ -93,11 +99,17 @@ class PetWindow(QWidget):
             self.lib.movie(self.drag).jumpToFrame(0)
 
         # ---- 窗口属性：无边框 + 透明 + 不进任务栏；置顶可配置 ----
-        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        flags = (
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
         if config.get('on_top', True):
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAutoFillBackground(False)
         if sys.platform == 'darwin' and config.get('on_top', True):
             # macOS 上 Tool 窗口的置顶由 WA_MacAlwaysShowToolWindow 控制，
             # WindowStaysOnTopHint 对 Tool 窗口不可靠（Qt 官方已知问题 QTBUG-38580）
@@ -110,6 +122,7 @@ class PetWindow(QWidget):
         self.no_move: bool = bool(config.get('no_move', False))  # 不移动：禁用自动移动
         self.movie = None
         self._frame_pixmap: QPixmap | None = None
+        self._mask_initialized = False
         self._ended_fired = False
 
         # ---- 交互状态 ----
@@ -240,6 +253,7 @@ class PetWindow(QWidget):
         self.anim = name
         movie = self.lib.movie(name)
         self.movie = movie
+        self._mask_initialized = False
         movie.stop()
         movie.jumpToFrame(0)
         self._ended_fired = False
@@ -272,11 +286,26 @@ class PetWindow(QWidget):
         img = img.scaled(w_c, h_c,
                          Qt.AspectRatioMode.IgnoreAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
-        self._frame_pixmap = QPixmap.fromImage(img)
+        # XWayland's translucent backing store is more reliable with premultiplied
+        # alpha. Keeping straight RGBA here can leave the old frame's RGB values
+        # behind when a transparent pixel is repainted.
+        self._frame_pixmap = QPixmap.fromImage(
+            img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        )
         self._sync_mask()
 
-    def _sync_mask(self) -> None:
+    def _sync_mask(self, force: bool = False) -> None:
         """按当前帧 alpha 设置窗口 mask：透明区域鼠标穿透到下层窗口。"""
+        if not self._use_native_mask:
+            # KWin's XWayland shape path can leave a black rectangle or the
+            # first frame's outline on translucent windows. KDE receives the
+            # full transparent surface instead; the visual frame is still
+            # alpha-composited normally.
+            if not self.mask().isNull():
+                self.clearMask()
+            return
+        if self._dragging or (self._mask_initialized and not force):
+            return
         canvas = QImage(self._w, self._h, QImage.Format.Format_ARGB32)
         canvas.fill(Qt.GlobalColor.transparent)
         p = QPainter(canvas)
@@ -284,10 +313,23 @@ class PetWindow(QWidget):
         if self._frame_pixmap is not None:
             p.drawPixmap(0, 0, self._frame_pixmap)
         p.end()
-        self.setMask(QBitmap.fromImage(canvas.createAlphaMask()))
+        # VP9 alpha decoding can leave black RGB values with alpha 1-2 around
+        # the frame edges. Treat those codec crumbs as transparent so KWin does
+        # not turn them into a visible rectangular window outline.
+        alpha_mask = canvas.createAlphaMask(
+            Qt.ImageConversionFlag.MonoOnly | Qt.ImageConversionFlag.ThresholdDither
+        )
+        self.setMask(QBitmap.fromImage(alpha_mask))
+        self._mask_initialized = True
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         painter = QPainter(self)
+        # Clear removes both alpha and RGB from the backing store. Source-over
+        # with a transparent brush only changes alpha and can preserve a black
+        # RGB fringe in KWin/XWayland.
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self._frame_pixmap is not None:
             # 落地对齐：整帧下移 PAD×scale，让人物脚底踩在窗口底线
@@ -357,7 +399,10 @@ class PetWindow(QWidget):
         """
         if self._move_plan is not None:
             return True  # 已在移动/已计划
-        avail = self.screen().availableGeometry()
+        scr = self._screen_available()
+        if scr is None:
+            return False
+        avail = scr.availableGeometry()
         dir_sign = 1 if self.facing == 'right' else -1
         cx = self.x() + self._w / 2
         distance = random.randint(catalog.MOVE_MIN_PX, catalog.MOVE_MAX_PX)
@@ -461,6 +506,8 @@ class PetWindow(QWidget):
         elif dist < catalog.DRAG_THRESHOLD * self.scale:
             self._on_click()
         self._dragging = False
+        self._mask_initialized = False
+        self._sync_mask()
         self._press_global = None
         self._grab_offset = None
         event.accept()

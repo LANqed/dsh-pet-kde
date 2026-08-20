@@ -22,6 +22,13 @@ curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde
 - 启动命令：`~/.local/bin/dsh-pet`
 - KDE 应用菜单项：`dsh-pet`
 
+安装器会按需将 `~/.local/bin` 注册到 `~/.profile`，重新打开终端后可以直接执行 `dsh-pet`。
+当前终端尚未刷新环境时执行：
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 安装完成后会自动启动。建议执行前先查看[安装脚本](https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde.sh)内容。
 
 不自动启动：
@@ -41,6 +48,8 @@ curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde
 ```sh
 curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde.sh | bash -s -- --uninstall --purge
 ```
+
+卸载时会先移除 KDE/XDG 自启动项，再检查 dsh-pet 是否仍在运行。若程序尚未退出，安装文件不会删除；请从托盘退出后重新执行卸载命令。
 
 安装器支持 Alpine、Debian/Ubuntu、Fedora、Arch 和 openSUSE 系列发行版。程序安装在用户目录；仅在缺少系统依赖时通过 `sudo` 调用包管理器。
 

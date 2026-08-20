@@ -47,6 +47,26 @@ BIN_DIR="$HOME/.local/bin"
 LAUNCHER="$BIN_DIR/dsh-pet"
 DESKTOP_FILE="$DATA_HOME/applications/$APP_ID.desktop"
 AUTOSTART_FILE="$CONFIG_HOME/autostart/$APP_ID.desktop"
+PROFILE_FILE="$HOME/.profile"
+
+running_pids() {
+    uid=$(id -u)
+    for proc in /proc/[0-9]*; do
+        [ -r "$proc/status" ] && [ -r "$proc/comm" ] && [ -r "$proc/cmdline" ] || continue
+        proc_uid=$(awk '/^Uid:/{print $2; exit}' "$proc/status")
+        [ "$proc_uid" = "$uid" ] || continue
+        IFS= read -r comm < "$proc/comm" || continue
+        case "$comm" in
+            python*) ;;
+            *) continue ;;
+        esac
+        if tr '\000' '\n' < "$proc/cmdline" \
+            | awk 'previous == "-m" && $0 == "pet" { found = 1 } { previous = $0 } END { exit !found }'; then
+            pid=${proc##*/}
+            [ "$pid" = "$$" ] || printf '%s\n' "$pid"
+        fi
+    done
+}
 
 has_system_runtime() {
     command -v python3 >/dev/null 2>&1 \
@@ -66,8 +86,17 @@ run_root() {
 }
 
 uninstall() {
+    # Disable autostart before checking the process. If the app is still open,
+    # leave the installation intact so its running files cannot be deleted.
+    rm -f "$AUTOSTART_FILE"
+    pids=$(running_pids || true)
+    if [ -n "$pids" ]; then
+        say "卸载已中止：检测到 dsh-pet 仍在运行（PID: $(printf '%s' "$pids" | tr '\n' ' ')）。"
+        say "请先从托盘退出 dsh-pet，然后重新执行卸载命令。"
+        exit 1
+    fi
     rm -rf "$INSTALL_DIR"
-    rm -f "$LAUNCHER" "$DESKTOP_FILE" "$AUTOSTART_FILE"
+    rm -f "$LAUNCHER" "$DESKTOP_FILE"
     if [ "${1:-}" = "--purge" ]; then
         rm -rf "$CONFIG_HOME/dsh-pet-standalone"
     fi
@@ -178,6 +207,13 @@ exec "$PYTHON" -m pet "\$@"
 EOF
 chmod +x "$LAUNCHER"
 
+if ! grep -F '$HOME/.local/bin' "$PROFILE_FILE" >/dev/null 2>&1; then
+    {
+        printf '\n# Added by dsh-pet installer\n'
+        printf 'export PATH="$HOME/.local/bin:$PATH"\n'
+    } >> "$PROFILE_FILE"
+fi
+
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
@@ -196,6 +232,10 @@ command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || tru
 say "安装完成。"
 say "启动命令: $LAUNCHER"
 say "也可以在 KDE 应用菜单中搜索 dsh-pet。"
+case ":${PATH}:" in
+    *":$BIN_DIR:"*) ;;
+    *) say "dsh-pet 命令已注册；重新打开终端后生效。当前终端可执行：export PATH=\"$BIN_DIR:\$PATH\"" ;;
+esac
 say "卸载命令: $SCRIPT_DIR/install-kde.sh --uninstall"
 
 if [ "${1:-}" != "--no-launch" ]; then

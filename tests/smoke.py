@@ -74,14 +74,31 @@ def main() -> int:
         # KWin/XWayland gets an unshaped translucent surface to avoid black
         # rectangles and stale first-frame outlines in its shape compositor.
         assert win.mask().isNull()
-    assert win.width() == int(round(catalog.CANVAS_W * win.scale))
-    assert win.height() == int(round((catalog.CANVAS_H + catalog.PAD) * win.scale))
+    assert win.width() == int(round(catalog.CONTENT_W * win.scale))
+    assert win.height() == int(round(catalog.CONTENT_H * win.scale))
+
+    # 4b. 帧已裁切到内容区：四周留出边距，窗口明显小于原始 16:9 画布
+    pm = win._frame_pixmap
+    assert pm is not None
+    assert pm.width() == int(round(catalog.CONTENT_W * win.scale))
+    assert pm.height() == int(round(catalog.CONTENT_H * win.scale))
+    img = pm.toImage()
+    bottom_most = -1
+    for y in range(img.height() - 1, -1, -1):
+        if any(img.pixelColor(x, y).alpha() >= 8 for x in range(0, img.width(), 2)):
+            bottom_most = y
+            break
+    assert bottom_most >= 0
+    # 脚底下方留地面边距，不应过大（约 20 画布像素，缩放后按比例放宽到 30）
+    assert img.height() - 1 - bottom_most <= 30, (img.height(), bottom_most, "底部边距过大")
+    # 相比原始 640×360 画布，裁切后窗口明显更小（不再悬在 16:9 大矩形里）
+    assert win.width() < catalog.CANVAS_W * win.scale
 
     # 5. 缩放：底边不动
     bottom = win.geometry().bottom()
     win.change_scale(1.25)
     assert win.geometry().bottom() == bottom
-    assert win.width() == int(round(catalog.CANVAS_W * 1.25))
+    assert win.width() == int(round(catalog.CONTENT_W * 1.25))
     win.change_scale(1.0)
 
     # 6. 点击回应：仅待机时可点；播完回待机缓冲

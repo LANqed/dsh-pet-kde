@@ -155,9 +155,9 @@ class PetWindow(QWidget):
 
     # ================================================================ 尺寸
     def _apply_scale(self) -> None:
-        """按缩放计算窗口尺寸：宽度 220×scale，高度 (124+落地偏移)×scale。"""
-        self._w = max(1, int(round(catalog.CANVAS_W * self.scale)))
-        self._h = max(1, int(round((catalog.CANVAS_H + catalog.PAD) * self.scale)))
+        """按缩放计算窗口尺寸：内容裁切区 325×273，脚底贴窗口底线。"""
+        self._w = max(1, int(round(catalog.CONTENT_W * self.scale)))
+        self._h = max(1, int(round(catalog.CONTENT_H * self.scale)))
         self.setFixedSize(self._w, self._h)
 
     def change_scale(self, scale: float) -> None:
@@ -302,7 +302,7 @@ class PetWindow(QWidget):
             self._on_anim_ended(name)
 
     def _rebuild_frame(self) -> None:
-        """重建当前帧：缩放 + 朝向镜像 + 生成窗口 mask。"""
+        """重建当前帧：裁切到内容区 + 缩放 + 朝向镜像 + 生成窗口 mask。"""
         if self.movie is None:
             return
         pm = self.movie.currentPixmap()
@@ -311,8 +311,11 @@ class PetWindow(QWidget):
         img = pm.toImage()
         if self.facing == 'right':
             img = img.mirrored(True, False)
-        w_c = max(1, int(round(catalog.CANVAS_W * self.scale)))
-        h_c = max(1, int(round(catalog.CANVAS_H * self.scale)))
+        # 裁掉 webm 四周空白：只保留角色内容区，桌宠不再悬在大矩形里
+        img = img.copy(catalog.CONTENT_X, catalog.CONTENT_Y,
+                       catalog.CONTENT_W, catalog.CONTENT_H)
+        w_c = max(1, int(round(catalog.CONTENT_W * self.scale)))
+        h_c = max(1, int(round(catalog.CONTENT_H * self.scale)))
         img = img.scaled(w_c, h_c,
                          Qt.AspectRatioMode.IgnoreAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
@@ -339,7 +342,6 @@ class PetWindow(QWidget):
         canvas = QImage(self._w, self._h, QImage.Format.Format_ARGB32)
         canvas.fill(Qt.GlobalColor.transparent)
         p = QPainter(canvas)
-        p.translate(0, int(round(catalog.PAD * self.scale)))
         if self._frame_pixmap is not None:
             p.drawPixmap(0, 0, self._frame_pixmap)
         p.end()
@@ -362,8 +364,7 @@ class PetWindow(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self._frame_pixmap is not None:
-            # 落地对齐：整帧下移 PAD×scale，让人物脚底踩在窗口底线
-            painter.translate(0, int(round(catalog.PAD * self.scale)))
+            # 内容已裁切到脚贴底线的区域，直接铺满窗口
             painter.drawPixmap(0, 0, self._frame_pixmap)
         painter.end()
 
@@ -560,8 +561,8 @@ class PetWindow(QWidget):
         """当前窗口坐标是否落在角色可见像素上。"""
         if self._frame_pixmap is None:
             return False
-        y = point.y() - int(round(catalog.PAD * self.scale))
         x = point.x()
+        y = point.y()
         if x < 0 or y < 0 or x >= self._frame_pixmap.width() or y >= self._frame_pixmap.height():
             return False
         return self._frame_pixmap.toImage().pixelColor(x, y).alpha() >= 8
@@ -624,7 +625,7 @@ class PetWindow(QWidget):
 
         m_scale = menu.addMenu('大小')
         for s in catalog.SCALE_STEPS:
-            px = int(round(catalog.CANVAS_W * s))
+            px = int(round(catalog.CONTENT_W * s))
             act = m_scale.addAction(f'{px}px')
             act.setCheckable(True)
             act.setChecked(abs(self.scale - s) < 0.02)

@@ -42,6 +42,7 @@ class PetWindow(QWidget):
         self.cfg = config
         self.on_switch_character = None  # 由 app 注入，用于运行时切换角色
         self.on_rescan_characters = None  # 由 app 注入，重新扫描角色目录
+        self.on_locked_changed = None  # 由 app 注入，同步托盘勾选状态
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
         self._use_native_mask = not (
             'kde' in desktop or os.environ.get('KDE_FULL_SESSION')
@@ -247,6 +248,9 @@ class PetWindow(QWidget):
             self.show()
             if self.cfg.get('on_top', True):
                 self.raise_()
+        # 通知 app 同步托盘勾选：从右键菜单锁定时托盘不会自己更新
+        if self.on_locked_changed is not None:
+            self.on_locked_changed(on)
 
     def set_speed(self, speed: float) -> None:
         """设置动画播放速率（1.0x ~ 2.0x），立即生效并持久化。"""

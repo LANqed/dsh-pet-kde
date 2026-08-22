@@ -47,6 +47,7 @@ class PetApp:
         self.config = config
         self.win: PetWindow | None = None
         self.tray: QSystemTrayIcon | None = None
+        self._locked_action = None  # 托盘「锁定」项，用于反向同步勾选状态
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -69,6 +70,7 @@ class PetApp:
         win = PetWindow(lib, self.config)
         win.on_switch_character = self.switch_character
         win.on_rescan_characters = self.rescan_characters
+        win.on_locked_changed = self.sync_locked_action
         win.show()
 
         tray = self._build_tray(win)
@@ -114,6 +116,7 @@ class PetApp:
         win = PetWindow(lib, self.config)
         win.on_switch_character = self.switch_character
         win.on_rescan_characters = self.rescan_characters
+        win.on_locked_changed = self.sync_locked_action
         win.show()
 
         tray = self._build_tray(win)
@@ -162,6 +165,7 @@ class PetApp:
         locked.setCheckable(True)
         locked.setChecked(win.locked)
         locked.toggled.connect(win.set_locked)
+        self._locked_action = locked
 
         m_char = menu.addMenu('切换角色')
         current = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
@@ -214,6 +218,18 @@ class PetApp:
         except OSError:
             logging.warning('创建角色目录失败: %s', path)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def sync_locked_action(self, locked: bool) -> None:
+        """把窗口的锁定状态回写到托盘勾选，避免与右键菜单不同步。
+
+        setChecked 会再次触发 toggled → set_locked，用 blockSignals 断开回环。
+        """
+        action = self._locked_action
+        if action is None or action.isChecked() == locked:
+            return
+        action.blockSignals(True)
+        action.setChecked(locked)
+        action.blockSignals(False)
 
 
 def main(argv: list[str] | None = None) -> int:

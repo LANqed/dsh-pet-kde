@@ -274,6 +274,18 @@ def test_locking_stops_flight(win):
     win.set_locked(False)
 
 
+def test_locked_change_notifies_callback(win):
+    seen = []
+    win.on_locked_changed = seen.append
+    win.set_locked(True)
+    assert seen == [True]
+    win.set_locked(False)
+    assert seen == [True, False]
+    # 状态未变化时不重复通知
+    win.set_locked(False)
+    assert seen == [True, False]
+
+
 def test_drag_physics_persists(win):
     win.set_drag_physics(False)
     assert win.cfg.get("drag_physics") is False
@@ -320,3 +332,40 @@ def test_rescan_characters_invokes_callback(win):
     win.on_rescan_characters = lambda: called.append(1)
     win._rescan_characters()
     assert called == [1]
+
+
+def test_tray_locked_action_stays_in_sync(qapp, tmp_path):
+    """从右键菜单锁定后，托盘的「锁定」勾选应同步，且不产生信号回环。"""
+    from pet.app import PetApp
+
+    lib = FakeLibrary()
+    window = PetWindow(lib, Config(tmp_path))
+    controller = PetApp(qapp, window.cfg)
+    controller.win = window
+    window.on_locked_changed = controller.sync_locked_action
+    tray = controller._build_tray(window)
+    action = controller._locked_action
+    try:
+        assert action is not None
+        assert action.isChecked() is False
+
+        # 模拟右键菜单锁定：托盘勾选应跟随
+        window.set_locked(True)
+        assert action.isChecked() is True
+        assert window.locked is True
+
+        window.set_locked(False)
+        assert action.isChecked() is False
+        assert window.locked is False
+
+        # 反向：点击托盘项也能锁定，且不会被同步逻辑反转回去
+        action.setChecked(True)
+        assert window.locked is True
+        assert action.isChecked() is True
+
+        action.setChecked(False)
+        assert window.locked is False
+        assert action.isChecked() is False
+    finally:
+        tray.hide()
+        window.close()

@@ -2,14 +2,14 @@
 
 Qt 的 WindowDoesNotAcceptFocus 在部分构建下不会发出
 _NET_WM_STATE_SKIP_TASKBAR，这里通过标准 _NET_WM_STATE client message
-直接请求 KWin 跳过任务栏与分页器（X11/XWayland 专属，其余平台直接跳过）。
+直接请求 KWin 跳过任务栏与分页器。原生 Wayland 下无 libX11/DISPLAY，
+调用会静默失败并返回 False。
 """
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
-import sys
 
 _NET_WM_STATE_ADD = 1
 _SUBSTRUCTURE_REDIRECT_MASK = 1 << 20
@@ -64,8 +64,6 @@ def skip_taskbar(window_id: int) -> bool:
 
     setWindowFlag 会重建原生窗口（XID 变化），因此每次 showEvent 都应重新调用。
     """
-    if not sys.platform.startswith("linux"):
-        return False
     x11 = _lib()
     if x11 is None:
         return False

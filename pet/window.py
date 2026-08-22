@@ -8,7 +8,10 @@
   - 点击回应 / 拖拽动画播完先回待机缓冲，待机播完再进随机链；
   - 移动：动画只提供"走路姿态"（3 选 1），位置由 QTimer 驱动，
     开头/结尾各 2s 不动，中间按播放进度插值；
-  - 透明区域鼠标穿透：每帧用当前帧 alpha 生成窗口 mask（等效原版命中层设计）。
+  - 点击 Q 弹与拖动物理（抛出/重力/反弹/倾斜）由 60fps 特效定时器驱动。
+
+透明穿透：KDE/XWayland 下不使用 QWidget.setMask()（KWin 6 的 shape 合成会
+产生黑框与残影），改用无 shape 的完整透明 surface；其他 WM 仍逐帧生成 mask。
 """
 
 from __future__ import annotations
@@ -17,7 +20,6 @@ import logging
 import math
 import os
 import random
-import sys
 import time
 
 from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
@@ -31,46 +33,6 @@ from .config import Config
 from .library import MovieLibrary
 
 
-def _mac_set_window_level(view_id: int, level: int) -> bool:
-    """macOS 原生：把 NSWindow 层级设为指定值（3=置顶浮动，0=普通）。
-
-    Qt 的 WindowStaysOnTopHint 在 macOS 上对无边框 Tool 窗口/运行时切换不可靠，
-    这里用 objc runtime 直接调 [NSWindow setLevel:] 强制生效（ctypes 零依赖）。
-    """
-    if sys.platform != 'darwin':
-        return False
-    try:
-        import ctypes
-        import ctypes.util
-
-        lib_path = ctypes.util.find_library('objc') or '/usr/lib/libobjc.A.dylib'
-        objc = ctypes.cdll.LoadLibrary(lib_path)
-
-        # 关键：sel_registerName 返回 SEL（64 位指针）。ctypes 默认按 c_int(32 位)
-        # 截断返回值，损坏的 SEL 会让 ObjC runtime 段错误（SIGSEGV），必须显式声明
-        objc.sel_registerName.restype = ctypes.c_void_p
-        objc.sel_registerName.argtypes = [ctypes.c_char_p]
-
-        msg = objc.objc_msgSend
-        msg.restype = ctypes.c_void_p
-
-        sel_window = objc.sel_registerName(b'window')
-        sel_set_level = objc.sel_registerName(b'setLevel:')
-
-        # [view window] —— 无参，返回 NSWindow*
-        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        window = msg(ctypes.c_void_p(view_id), sel_window)
-        if not window:
-            return False
-
-        # [window setLevel:level] —— 一个 NSInteger 参数
-        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
-        msg(ctypes.c_void_p(window), sel_set_level, level)
-        return True
-    except Exception:
-        return False
-
-
 class PetWindow(QWidget):
     """桌宠窗口本体。"""
 
@@ -82,8 +44,7 @@ class PetWindow(QWidget):
         self.on_rescan_characters = None  # 由 app 注入，重新扫描角色目录
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
         self._use_native_mask = not (
-            sys.platform.startswith('linux')
-            and ('kde' in desktop or os.environ.get('KDE_FULL_SESSION'))
+            'kde' in desktop or os.environ.get('KDE_FULL_SESSION')
         )
 
         # 根据当前形象实际拥有的动画动态计算分类，支持不同角色动作不一致
@@ -120,10 +81,6 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAutoFillBackground(False)
-        if sys.platform == 'darwin' and config.get('on_top', True):
-            # macOS 上 Tool 窗口的置顶由 WA_MacAlwaysShowToolWindow 控制，
-            # WindowStaysOnTopHint 对 Tool 窗口不可靠（Qt 官方已知问题 QTBUG-38580）
-            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
 
         # ---- 状态 ----
         self.anim: str = self.idle
@@ -199,7 +156,7 @@ class PetWindow(QWidget):
 
     # ================================================================ 位置
     def _screen_available(self):
-        """窗口所在屏幕；macOS 上 self.screen() 可能失效，兜底主屏。"""
+        """窗口所在屏幕；未映射时兜底主屏。"""
         from PySide6.QtGui import QGuiApplication
         scr = self.screen()
         if scr is None:
@@ -250,29 +207,18 @@ class PetWindow(QWidget):
         self._save_position()
 
     def set_on_top(self, on: bool) -> None:
-        if sys.platform == 'darwin':
-            # 先设属性再改 flag：setWindowFlag 触发窗口重建时一并应用
-            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, on)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
         self.cfg.set('on_top', on)
         self.cfg.save()
         self.show()
-        if sys.platform == 'darwin':
-            # 延迟到 Qt 窗口重建完成后再强制原生层级，避免被 Qt 覆盖
-            QTimer.singleShot(0, lambda: _mac_set_window_level(int(self.winId()), 3 if on else 0))
         if on:
             self.raise_()
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
-        """窗口显示时校正层级（延迟执行，避免被 Qt 窗口重建覆盖）。"""
+        """窗口显示时请求跳过任务栏，避免出现在任务管理器/底部 dock。"""
         super().showEvent(event)
-        if sys.platform.startswith('linux'):
-            # KDE 任务管理器/底部 dock 不显示桌宠：X11/XWayland 下显式请求跳过任务栏。
-            # setWindowFlag 重建原生窗口后 XID 变化，故每次显示都重新应用。
-            QTimer.singleShot(0, lambda: x11_hints.skip_taskbar(int(self.winId())))
-        if sys.platform == 'darwin':
-            on = bool(self.cfg.get('on_top', True))
-            QTimer.singleShot(0, lambda: _mac_set_window_level(int(self.winId()), 3 if on else 0))
+        # setWindowFlag 重建原生窗口后 XID 变化，故每次显示都重新应用。
+        QTimer.singleShot(0, lambda: x11_hints.skip_taskbar(int(self.winId())))
 
     def set_no_move(self, on: bool) -> None:
         """切换「不移动」：禁用自动移动；勾选瞬间若正在移动则立即停下回待机。"""

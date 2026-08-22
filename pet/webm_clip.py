@@ -5,8 +5,6 @@ WebM-backed clip library（webm 主路线）。
 使用 imageio-ffmpeg 自带的静态 ffmpeg 解码 640×360 透明 webm：
 - read_frames(..., pix_fmt='rgba', bits_per_pixel=32, input_params=['-c:v','libvpx-vp9'])
   可正确保留 VP9 alpha，输出 RGBA 原始帧。
-- imageio_ffmpeg 内部在 Windows 上使用 STARTUPINFO 隐藏控制台窗口，
-  避免旧 ffmpeg 子进程方案导致的“窗口反复出现/消失”。
 
 线程模型：
 - 后台 reader 线程只负责把 RGBA 字节放入有界队列；

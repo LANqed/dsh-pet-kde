@@ -125,19 +125,34 @@ def test_kde_platform_respects_explicit_qpa():
         assert os.environ["QT_QPA_PLATFORM"] == "wayland"
 
 
-def test_linux_autostart_desktop_file(tmp_path: Path):
-    with (
-        patch.object(autostart, "_IS_WIN", False),
-        patch.object(autostart, "_IS_MAC", False),
-        patch.object(autostart, "_IS_LINUX", True),
-        patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}, clear=False),
-    ):
+def test_xdg_autostart_desktop_file(tmp_path: Path):
+    with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}, clear=False):
         autostart.enable()
         desktop = tmp_path / "autostart" / f"{autostart.APP_ID}.desktop"
         text = desktop.read_text(encoding="utf-8")
         assert "Type=Application" in text
         assert "Exec=" in text
+        assert "-m pet" in text
+        assert "Path=" in text
         assert "X-KDE-autostart-after=panel" in text
         assert autostart.is_enabled()
         autostart.disable()
         assert not desktop.exists()
+        assert not autostart.is_enabled()
+
+
+def test_autostart_set_enabled_roundtrip(tmp_path: Path):
+    with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}, clear=False):
+        autostart.set_enabled(True)
+        assert autostart.is_enabled()
+        autostart.set_enabled(False)
+        assert not autostart.is_enabled()
+
+
+def test_config_and_characters_follow_xdg_config_home(tmp_path: Path):
+    from pet.config import Config
+
+    with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}, clear=False):
+        config = Config()
+        assert config.dir == tmp_path / "dsh-pet-standalone"
+        assert catalog.user_characters_dir() == tmp_path / "dsh-pet-standalone" / "characters"

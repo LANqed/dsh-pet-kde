@@ -15,11 +15,6 @@ assets/videos/
 assets/animations/
 assets/characters/
 
-# PyInstaller 构建产物
-build/
-dist/
-*.spec
-
 # 本地开发文档（不随仓库发布）
 LOG.md
 LOG-INDEX.md

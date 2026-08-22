@@ -1,14 +1,12 @@
 # dsh-pet-indesktop for KDE
 
-基于 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 的动画素材与行为模型实现的独立桌面宠物。项目使用 Python、PySide6 和透明 WebM，支持 Windows、macOS 与 KDE Plasma。
+基于 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 的动画素材与行为模型实现的独立桌面宠物。纯 Linux 实现，面向 KDE Plasma，使用 Python、PySide6 和透明 WebM。
 
 原项目fork:[MerZlin/dsh-pet-indesktop Releases](https://github.com/MerZlin/dsh-pet-indesktop/releases)
 
-> KDE 版本目前只在 Alpine Edge、KDE Plasma 6.7.4、Wayland + XWayland 环境中实机验证过。
+> 目前只在 Alpine Edge、KDE Plasma 6.7.4、Wayland + XWayland 环境中实机验证过。
 
 ## 安装
-
-### KDE Plasma
 
 无需克隆仓库，一行命令安装：
 
@@ -53,19 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde
 
 安装器支持 Alpine、Debian/Ubuntu、Fedora、Arch 和 openSUSE 系列发行版。程序安装在用户目录；仅在缺少系统依赖时通过 `sudo` 调用包管理器。
 
-### Windows 与 macOS
-
-Windows 和 macOS 安装包由原项目发布，请前往：
-
-**[MerZlin/dsh-pet-indesktop Releases](https://github.com/MerZlin/dsh-pet-indesktop/releases)**
-
-| 平台 | 安装方式 |
-| --- | --- |
-| Windows | 下载 `.exe` 后直接运行 |
-| macOS Apple Silicon | 下载 ZIP，解压后打开 `.app` |
-| macOS Intel | 暂无预构建安装包，可按下文从源码运行 |
-
-macOS 安装包未经过 Apple 公证。首次运行可右键 `.app` 选择“打开”，或在“系统设置 → 隐私与安全性”中放行。
+Windows 与 macOS 请使用原项目发布的安装包：**[MerZlin/dsh-pet-indesktop Releases](https://github.com/MerZlin/dsh-pet-indesktop/releases)**
 
 ## 功能
 
@@ -80,7 +66,7 @@ macOS 安装包未经过 Apple 公证。首次运行可右键 `.app` 选择“�
 - 播放速率：右键或托盘菜单可调 1.0x ~ 2.0x
 - 多形象支持：自动发现内置角色，并支持从外部目录添加自定义角色
 - 角色热切换：右键桌宠或托盘菜单随时切换形象，无需重启；可直接打开角色文件夹并重新扫描
-- 透明穿透：Windows/macOS 逐帧按角色 alpha 生成窗口 mask，透明区域鼠标穿透到下层窗口
+- 透明穿透：非 KDE 的窗口管理器下逐帧按角色 alpha 生成窗口 mask，透明区域鼠标穿透到下层窗口
 - 锁定：从角色右键菜单锁定后整窗鼠标穿透，只能从托盘解锁
 - 窗口：透明无边框、可切换置顶、4 档大小；不显示在 KDE 任务管理器 / 底部 dock
 - 系统托盘：显示/隐藏、锁定、切换角色、拖动物理、播放速度、开机自启、退出
@@ -140,9 +126,7 @@ assets/characters/deepseek-tan/videos/
 无需修改安装目录，可以将角色放到用户配置目录：
 
 ```text
-Windows: %APPDATA%/dsh-pet-standalone/characters/<角色ID>/videos/
-macOS:   ~/Library/Application Support/dsh-pet-standalone/characters/<角色ID>/videos/
-Linux:   ${XDG_CONFIG_HOME:-~/.config}/dsh-pet-standalone/characters/<角色ID>/videos/
+${XDG_CONFIG_HOME:-~/.config}/dsh-pet-standalone/characters/<角色ID>/videos/
 ```
 
 一键安装会预先创建该目录并写入 `README.txt` 说明。最快的方式是：
@@ -169,8 +153,6 @@ Linux:   ${XDG_CONFIG_HOME:-~/.config}/dsh-pet-standalone/characters/<角色ID>/
 
 ## 从源码运行
 
-### Linux / KDE Plasma
-
 ```sh
 git clone https://github.com/LANqed/dsh-pet-kde.git
 cd dsh-pet-kde
@@ -187,24 +169,15 @@ sudo apk add python3 py3-pyside6 py3-imageio-ffmpeg ffmpeg xwayland
 python3 -m pet
 ```
 
-### Windows / macOS
-
-```sh
-pip install -r requirements.txt
-python -m pet
-```
-
 源码运行前需要确保 `assets/characters/<角色ID>/videos/` 中存在 WebM。远程 KDE 安装器在归档不含素材时，会从上游 dsh-pet 自动下载默认素材。
 
 ## 开机自启
 
-菜单中的“开机自启”直接管理系统配置：
+菜单中的“开机自启”直接写入 XDG autostart，勾选状态直接读取该文件，不与配置冗余：
 
-| 平台 | 实现 |
-| --- | --- |
-| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
-| macOS | `~/Library/LaunchAgents/` |
-| Linux/KDE | `${XDG_CONFIG_HOME:-~/.config}/autostart/com.merzlin.dsh-pet-standalone.desktop` |
+```text
+${XDG_CONFIG_HOME:-~/.config}/autostart/com.merzlin.dsh-pet-standalone.desktop
+```
 
 ## 技术实现
 
@@ -245,7 +218,6 @@ imageio_ffmpeg.read_frames(
 │   ├── window.py           # 窗口、动画状态机、Q 弹与拖动物理
 │   └── x11_hints.py        # X11 任务栏跳过提示
 ├── assets/characters/      # 内置角色素材
-├── packaging/              # PyInstaller 入口
 ├── tests/                  # 单元测试与 GUI 冒烟测试
 └── requirements.txt
 ```

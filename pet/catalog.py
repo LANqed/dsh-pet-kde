@@ -10,11 +10,8 @@ assets/thumb/*.webm（640×360 透明 webm，VP9 alpha）。
 - 落地偏移 PAD = 360 - 330 = 30px（绘制时把帧下移 PAD，让脚踩在窗口底线）
 """
 
-import os
-import sys
-
 import json
-
+import os
 from pathlib import Path
 
 # ---------------------------------------------------------------- 画布几何
@@ -211,33 +208,21 @@ def built_in_characters() -> list[str]:
 def user_characters_dir() -> Path:
     """用户可写的角色目录（一键安装用户放自定义角色的推荐位置）。
 
-    与 external_character_dirs() 的用户数据目录保持一致，
-    这样从菜单“打开角色文件夹”放进去的角色会被自动发现。
+    与 external_character_dirs() 保持一致，这样从菜单
+    「打开角色文件夹」放进去的角色会被自动发现。
     """
-    if sys.platform == 'win32':
-        data_root = Path(os.environ.get('APPDATA', Path.home())) / 'dsh-pet-standalone'
-    elif sys.platform == 'darwin':
-        data_root = Path.home() / 'Library' / 'Application Support' / 'dsh-pet-standalone'
-    else:
-        data_root = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'dsh-pet-standalone'
-    return data_root / 'characters'
+    config_home = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
+    return config_home / 'dsh-pet-standalone' / 'characters'
 
 
 def external_character_dirs() -> list[Path]:
-    """外部可扩展形象根目录（不存在时返回空列表，不报错）。
+    """外部可扩展形象根目录（不存在时静默跳过，不报错）。
 
     顺序：
-    1. exe 同目录 / 当前工作目录下的 characters/
-    2. 用户数据目录下的 dsh-pet-standalone/characters/
+    1. 当前工作目录下的 characters/
+    2. ${XDG_CONFIG_HOME:-~/.config}/dsh-pet-standalone/characters/
     """
-    dirs: list[Path] = []
-    if getattr(sys, 'frozen', False):
-        base = Path(sys.executable).resolve().parent
-    else:
-        base = Path.cwd()
-    dirs.append(base / 'characters')
-    dirs.append(user_characters_dir())
-    return dirs
+    return [Path.cwd() / 'characters', user_characters_dir()]
 
 
 def resolve_character_video_dir(character_id: str) -> Path:

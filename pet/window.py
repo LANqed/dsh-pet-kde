@@ -18,9 +18,10 @@ import math
 import os
 import random
 import sys
+import time
 
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QBitmap, QImage, QPainter, QPixmap
+from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
+from PySide6.QtGui import QBitmap, QDesktopServices, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from . import autostart as autostart_mod
@@ -78,6 +79,7 @@ class PetWindow(QWidget):
         self.lib = lib
         self.cfg = config
         self.on_switch_character = None  # 由 app 注入，用于运行时切换角色
+        self.on_rescan_characters = None  # 由 app 注入，重新扫描角色目录
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
         self._use_native_mask = not (
             sys.platform.startswith('linux')
@@ -128,16 +130,39 @@ class PetWindow(QWidget):
         self.facing: str = config.get('facing', 'left')  # left | right
         self.scale: float = float(config.get('scale', catalog.DEFAULT_SCALE))
         self.no_move: bool = bool(config.get('no_move', False))  # 不移动：禁用自动移动
+        self.speed: float = float(config.get('speed', 1.0))      # 播放速率 1.0x~2.0x
+        self.drag_physics: bool = bool(config.get('drag_physics', True))
         self.movie = None
         self._frame_pixmap: QPixmap | None = None
         self._mask_initialized = False
         self._ended_fired = False
+        lib.set_speed(self.speed)
 
         # ---- 交互状态 ----
         self._press_global: QPoint | None = None
         self._grab_offset: QPoint | None = None  # 按下时 鼠标全局坐标 - 窗口左上角
         self._dragging = False
         self._just_dragged = False               # 抑制拖拽结束后的幽灵点击
+
+        # ---- Q 弹（点击挤压回弹）----
+        self._squash_t = 0.0
+        self._squash_active = False
+        self._squash_sx = 1.0
+        self._squash_sy = 1.0
+
+        # ---- 拖动物理（抛出/重力/反弹 + 倾斜）----
+        self._samples: list[tuple[float, QPoint]] = []  # (时间, 全局鼠标点)
+        self._fly_vx = 0.0
+        self._fly_vy = 0.0
+        self._fly_x = 0.0
+        self._fly_y = 0.0
+        self._flying = False
+        self._lean_deg = 0.0
+
+        # 60fps 特效驱动：Q 弹 + 抛飞共用一个计时器
+        self._fx_timer = QTimer(self)
+        self._fx_timer.setInterval(catalog.ANIM_TICK_MS)
+        self._fx_timer.timeout.connect(self._on_fx_tick)
 
         # ---- 移动驱动 ----
         self._move_plan: dict | None = None
@@ -267,6 +292,7 @@ class PetWindow(QWidget):
         self._press_global = None
         self._grab_offset = None
         self._dragging = False
+        self._stop_fly()
         self.cfg.set('locked', on)
         self.cfg.save()
         was_visible = self.isVisible()
@@ -275,6 +301,29 @@ class PetWindow(QWidget):
             self.show()
             if self.cfg.get('on_top', True):
                 self.raise_()
+
+    def set_speed(self, speed: float) -> None:
+        """设置动画播放速率（1.0x ~ 2.0x），立即生效并持久化。"""
+        speed = max(0.5, min(4.0, float(speed)))
+        if abs(speed - self.speed) < 1e-6:
+            return
+        self.speed = speed
+        self.lib.set_speed(speed)
+        self.cfg.set('speed', speed)
+        self.cfg.save()
+        if self._move_plan is not None:
+            # 移动时长按新速率折算，位置插值继续与动画同步
+            self._move_plan['duration'] = self.lib.duration(self.anim) / speed
+
+    def set_drag_physics(self, on: bool) -> None:
+        """开关拖动物理（松手抛出、重力、反弹与倾斜）。"""
+        self.drag_physics = bool(on)
+        self.cfg.set('drag_physics', self.drag_physics)
+        self.cfg.save()
+        if not self.drag_physics:
+            self._stop_fly()
+            self._lean_deg = 0.0
+            self.update()
 
     # ================================================================ 播放
     def _switch(self, name: str) -> None:
@@ -364,6 +413,15 @@ class PetWindow(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self._frame_pixmap is not None:
+            sx, sy = self._squash_sx, self._squash_sy
+            lean = self._lean_deg
+            if abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3 or abs(lean) > 1e-3:
+                # 以脚底中点为锚：Q 弹压缩与惯性倾斜都不该让角色离地
+                painter.translate(self._w / 2.0, float(self._h))
+                if abs(lean) > 1e-3:
+                    painter.rotate(lean)
+                painter.scale(sx, sy)
+                painter.translate(-self._w / 2.0, -float(self._h))
             # 内容已裁切到脚贴底线的区域，直接铺满窗口
             painter.drawPixmap(0, 0, self._frame_pixmap)
         painter.end()
@@ -491,6 +549,167 @@ class PetWindow(QWidget):
         self._move_timer.stop()
         self._move_plan = None
 
+    # ================================================================ Q 弹 / 物理
+    def _fx_needed(self) -> bool:
+        return self._squash_active or self._flying
+
+    def _sync_fx_timer(self) -> None:
+        if self._fx_needed():
+            if not self._fx_timer.isActive():
+                self._fx_timer.start()
+        elif self._fx_timer.isActive():
+            self._fx_timer.stop()
+
+    def trigger_squash(self) -> None:
+        """点击 Q 弹：立即从压缩状态开始阻尼回弹（连点会重新触发）。"""
+        self._squash_t = 0.0
+        self._squash_active = True
+        self._apply_squash()
+        self._sync_fx_timer()
+        self.update()
+
+    def _apply_squash(self) -> None:
+        """按当前相位算出纵/横缩放（体积守恒式补偿，脚底为锚）。"""
+        if not self._squash_active:
+            self._squash_sx = 1.0
+            self._squash_sy = 1.0
+            return
+        t = self._squash_t
+        decay = math.exp(-t / catalog.SQUASH_TAU)
+        # cos 相位保证 t=0 时压缩最大，随后阻尼振荡回 1.0
+        offset = catalog.SQUASH_AMPLITUDE * decay * math.cos(catalog.SQUASH_OMEGA * t)
+        self._squash_sy = max(0.5, 1.0 - offset)
+        self._squash_sx = max(0.5, 1.0 + offset * catalog.SQUASH_X_RATIO)
+
+    def _stop_squash(self) -> None:
+        self._squash_active = False
+        self._squash_t = 0.0
+        self._squash_sx = 1.0
+        self._squash_sy = 1.0
+        self._sync_fx_timer()
+
+    def _record_sample(self, global_pos: QPoint) -> None:
+        """记录拖拽轨迹采样点，用于松手时估算抛出速度。"""
+        now = time.monotonic()
+        self._samples.append((now, QPoint(global_pos)))
+        cutoff = now - max(catalog.VELOCITY_WINDOW_SEC * 3, 0.25)
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.pop(0)
+
+    def _drag_velocity(self) -> tuple[float, float]:
+        """用采样窗口内的位移估算速度（px/s）。"""
+        if len(self._samples) < 2:
+            return 0.0, 0.0
+        t_end, p_end = self._samples[-1]
+        base = t_end - catalog.VELOCITY_WINDOW_SEC
+        t_start, p_start = self._samples[0]
+        for t, p in self._samples:
+            if t >= base:
+                t_start, p_start = t, p
+                break
+        dt = t_end - t_start
+        if dt <= 1e-4:
+            return 0.0, 0.0
+        return (p_end.x() - p_start.x()) / dt, (p_end.y() - p_start.y()) / dt
+
+    def _update_lean(self, vx: float) -> None:
+        """按水平速度产生倾斜（惯性/离心感）。"""
+        if not self.drag_physics:
+            self._lean_deg = 0.0
+            return
+        lean = max(-catalog.LEAN_MAX_DEG,
+                   min(catalog.LEAN_MAX_DEG, -vx * catalog.LEAN_PER_PX_S))
+        self._lean_deg = lean
+
+    def _start_fly(self, vx: float, vy: float) -> None:
+        """松手抛出：进入重力/反弹模拟。"""
+        speed = math.hypot(vx, vy)
+        if speed > catalog.THROW_MAX_SPEED:
+            k = catalog.THROW_MAX_SPEED / speed
+            vx, vy = vx * k, vy * k
+        self._fly_vx = vx
+        self._fly_vy = vy
+        self._fly_x = float(self.x())
+        self._fly_y = float(self.y())
+        self._flying = True
+        self._sync_fx_timer()
+
+    def _stop_fly(self) -> None:
+        if self._flying:
+            self._flying = False
+            self._fly_vx = 0.0
+            self._fly_vy = 0.0
+            self._lean_deg = 0.0
+        self._sync_fx_timer()
+
+    def _on_fx_tick(self) -> None:
+        """60fps 特效步进：Q 弹相位推进 + 抛飞物理积分。"""
+        dt = catalog.ANIM_TICK_MS / 1000.0
+        dirty = False
+
+        if self._squash_active:
+            self._squash_t += dt
+            if self._squash_t >= catalog.SQUASH_DURATION:
+                self._stop_squash()
+            else:
+                self._apply_squash()
+            dirty = True
+
+        if self._flying:
+            self._step_fly(dt)
+            dirty = True
+
+        self._sync_fx_timer()
+        if dirty:
+            self.update()
+
+    def _step_fly(self, dt: float) -> None:
+        """一步抛体运动：重力 + 空气阻力 + 屏幕边界反弹。"""
+        scr = self._screen_available()
+        if scr is None:
+            self._stop_fly()
+            return
+        avail = scr.availableGeometry()
+        left, top = avail.left(), avail.top()
+        right = avail.right() - self._w + 1
+        bottom = avail.bottom() - self._h + 1
+
+        self._fly_vy += catalog.GRAVITY * dt
+        self._fly_vx *= catalog.AIR_DRAG
+        self._fly_vy *= catalog.AIR_DRAG
+        self._fly_x += self._fly_vx * dt
+        self._fly_y += self._fly_vy * dt
+
+        on_ground = False
+        if self._fly_x <= left:
+            self._fly_x = float(left)
+            self._fly_vx = abs(self._fly_vx) * catalog.WALL_BOUNCE
+        elif self._fly_x >= right:
+            self._fly_x = float(right)
+            self._fly_vx = -abs(self._fly_vx) * catalog.WALL_BOUNCE
+        if self._fly_y <= top:
+            self._fly_y = float(top)
+            self._fly_vy = abs(self._fly_vy) * catalog.WALL_BOUNCE
+        elif self._fly_y >= bottom:
+            self._fly_y = float(bottom)
+            self._fly_vy = -abs(self._fly_vy) * catalog.GROUND_BOUNCE
+            self._fly_vx *= catalog.GROUND_FRICTION
+            on_ground = True
+
+        self.move(int(round(self._fly_x)), int(round(self._fly_y)))
+        self._update_lean(self._fly_vx)
+
+        settled = (
+            on_ground
+            and abs(self._fly_vy) < catalog.SETTLE_SPEED
+            and abs(self._fly_vx) < catalog.SETTLE_SPEED
+        )
+        if settled:
+            self._stop_fly()
+            self._save_position()
+            if self.idles and self.anim == self.drag:
+                self._switch(self._pick(self.idles))
+
     # ================================================================ 交互
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -498,6 +717,9 @@ class PetWindow(QWidget):
             self._grab_offset = self._press_global - self.pos()
             self._dragging = False
             self._cancel_move()  # 按下即打断移动
+            self._stop_fly()     # 抓住正在飞的桌宠
+            self._samples = []
+            self._record_sample(self._press_global)
             event.accept()
         else:
             super().mousePressEvent(event)
@@ -514,6 +736,10 @@ class PetWindow(QWidget):
             if self.drag:
                 self._switch(self.drag)  # 进入拖拽：播放悬空反馈动画
         self.move(g - self._grab_offset)  # 跟手（保持抓起时的偏移）
+        self._record_sample(g)
+        if self.drag_physics:
+            vx, _ = self._drag_velocity()
+            self._update_lean(vx)   # 拖拽过程中的惯性/离心倾斜
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
@@ -531,12 +757,19 @@ class PetWindow(QWidget):
             QTimer.singleShot(150, self._clear_just_dragged)
             if self._grab_offset is not None:
                 self.move(g - self._grab_offset)  # 停在松手处
-            self._save_position()
-            if self.idles:
-                self._switch(self._pick(self.idles))  # 回待机缓冲
+            self._record_sample(g)
+            vx, vy = self._drag_velocity()
+            if self.drag_physics and math.hypot(vx, vy) >= catalog.THROW_MIN_SPEED:
+                self._start_fly(vx, vy)  # 甩出去：交给重力/反弹接管
+            else:
+                self._lean_deg = 0.0
+                self._save_position()
+                if self.idles:
+                    self._switch(self._pick(self.idles))  # 回待机缓冲
         elif dist < catalog.DRAG_THRESHOLD * self.scale:
             self._on_click()
         self._dragging = False
+        self._samples = []
         self._mask_initialized = False
         self._sync_mask()
         self._press_global = None
@@ -547,12 +780,14 @@ class PetWindow(QWidget):
         self._just_dragged = False
 
     def _on_click(self) -> None:
-        """真点击 → 随机一个点击回应动画。"""
+        """真点击 → Q 弹反馈 + 随机一个点击回应动画。"""
         if self._just_dragged:
             return
+        # Q 弹独立于动画链：连点也能立刻重复触发挤压回弹
+        self.trigger_squash()
         if not self.clicks:
             return
-        if self.idles and self.anim not in self.idles:
+        if self.idles and self.anim not in self.idles and self.anim not in self.clicks:
             return  # 链上非待机动画播放中不打断
         self._cancel_move()
         self._switch(self._pick(self.clicks))
@@ -571,6 +806,11 @@ class PetWindow(QWidget):
         if self.locked or not self._is_character_pixel(event.pos()):
             event.ignore()
             return
+        menu = self.build_context_menu()
+        menu.exec(event.globalPos())
+
+    def build_context_menu(self) -> QMenu:
+        """构造右键菜单（不弹出），便于复用与测试。"""
         menu = QMenu(self)
 
         if self.idles:
@@ -601,6 +841,9 @@ class PetWindow(QWidget):
             act.setCheckable(True)
             act.setChecked(cid == current)
             act.triggered.connect(lambda checked=False, cid=cid: self._request_switch_character(cid))
+        m_char.addSeparator()
+        m_char.addAction('打开角色文件夹…', self._open_characters_dir)
+        m_char.addAction('重新扫描角色', self._rescan_characters)
 
         menu.addSeparator()
         menu.addAction('回到右下角', self._go_default_corner)
@@ -615,6 +858,11 @@ class PetWindow(QWidget):
         no_move.setChecked(self.no_move)
         no_move.toggled.connect(self.set_no_move)
 
+        physics = menu.addAction('拖动物理')
+        physics.setCheckable(True)
+        physics.setChecked(self.drag_physics)
+        physics.toggled.connect(self.set_drag_physics)
+
         lock = menu.addAction('锁定并穿透鼠标')
         lock.triggered.connect(lambda checked=False: self.set_locked(True))
 
@@ -622,6 +870,13 @@ class PetWindow(QWidget):
         auto.setCheckable(True)
         auto.setChecked(autostart_mod.is_enabled())
         auto.toggled.connect(autostart_mod.set_enabled)
+
+        m_speed = menu.addMenu('播放速度')
+        for sp in catalog.SPEED_STEPS:
+            act = m_speed.addAction(f'{sp:g}x')
+            act.setCheckable(True)
+            act.setChecked(abs(self.speed - sp) < 0.02)
+            act.triggered.connect(lambda checked=False, sp=sp: self.set_speed(sp))
 
         m_scale = menu.addMenu('大小')
         for s in catalog.SCALE_STEPS:
@@ -633,7 +888,7 @@ class PetWindow(QWidget):
 
         menu.addSeparator()
         menu.addAction('退出', self._request_quit)
-        menu.exec(event.globalPos())
+        return menu
 
     def _request_switch_character(self, character_id: str) -> None:
         """请求切换角色；优先交给 app 做热切换，否则只保存配置。"""
@@ -643,10 +898,27 @@ class PetWindow(QWidget):
             self.cfg.set('character', character_id)
             self.cfg.save()
 
+    def _open_characters_dir(self) -> None:
+        """打开用户角色目录（不存在则先创建），方便一键安装的用户放素材。"""
+        path = catalog.user_characters_dir()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logging.warning('创建角色目录失败: %s', path)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _rescan_characters(self) -> None:
+        """重新扫描角色目录；新增角色无需重启即可出现在菜单里。"""
+        ids = catalog.list_available_characters()
+        logging.info('重新扫描角色: %s', ids)
+        if self.on_rescan_characters is not None:
+            self.on_rescan_characters()
+
     def _request_quit(self) -> None:
         self._save_position()
         QApplication.instance().quit()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._fx_timer.stop()
         self._save_position()
         super().closeEvent(event)

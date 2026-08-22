@@ -5,9 +5,23 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from pet import catalog
 from pet import autostart
 from pet.kde import configure_platform
+
+
+def _assets_present() -> bool:
+    """素材是 gitignore 的，不在仓库归档里；缺失时跳过素材相关断言。"""
+    video_dir = catalog.resolve_character_video_dir(catalog.DEFAULT_CHARACTER)
+    return video_dir.is_dir() and any(video_dir.rglob("*.webm"))
+
+
+requires_assets = pytest.mark.skipif(
+    not _assets_present(),
+    reason="默认角色素材缺失（assets/ 未随仓库分发）",
+)
 
 
 def test_catalog_integrity():
@@ -22,11 +36,13 @@ def test_catalog_integrity():
     assert catalog.FRAME_MS > 0
 
 
+@requires_assets
 def test_default_character_assets_exist():
     assert catalog.DEFAULT_CHARACTER in catalog.built_in_characters()
     assert catalog.resolve_character_video_dir(catalog.DEFAULT_CHARACTER).name == "videos"
 
 
+@requires_assets
 def test_default_character_categories_match_original_asset_set():
     names = [path.stem for path in catalog.resolve_character_video_dir(
         catalog.DEFAULT_CHARACTER
@@ -48,6 +64,44 @@ def test_locked_config_persists(tmp_path: Path):
     config.set("locked", True)
     config.save()
     assert Config(tmp_path).get("locked") is True
+
+
+def test_speed_and_physics_defaults_persist(tmp_path: Path):
+    from pet.config import Config
+
+    config = Config(tmp_path)
+    assert config.get("speed") == 1.0
+    assert config.get("drag_physics") is True
+    config.set("speed", 1.75)
+    config.set("drag_physics", False)
+    config.save()
+    reloaded = Config(tmp_path)
+    assert reloaded.get("speed") == 1.75
+    assert reloaded.get("drag_physics") is False
+
+
+def test_speed_steps_cover_1x_to_2x():
+    assert catalog.SPEED_STEPS[0] == 1.0
+    assert catalog.SPEED_STEPS[-1] == 2.0
+    assert list(catalog.SPEED_STEPS) == sorted(catalog.SPEED_STEPS)
+
+
+def test_user_characters_dir_is_external_search_path():
+    target = catalog.user_characters_dir()
+    assert target.name == "characters"
+    assert target in catalog.external_character_dirs()
+
+
+def test_squash_and_physics_constants_are_sane():
+    assert 0 < catalog.SQUASH_AMPLITUDE < 1
+    assert catalog.SQUASH_DURATION > 0
+    assert catalog.SQUASH_TAU > 0
+    assert catalog.GRAVITY > 0
+    assert 0 < catalog.GROUND_BOUNCE < 1
+    assert 0 < catalog.WALL_BOUNCE < 1
+    assert 0 < catalog.AIR_DRAG <= 1
+    assert catalog.THROW_MIN_SPEED < catalog.THROW_MAX_SPEED
+    assert catalog.ANIM_TICK_MS > 0
 
 
 def test_kde_wayland_uses_xwayland():

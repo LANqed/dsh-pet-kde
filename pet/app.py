@@ -15,8 +15,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import autostart as autostart_mod
@@ -94,6 +94,7 @@ class PetApp:
         lib = self._create_library(character_id)
         win = PetWindow(lib, self.config)
         win.on_switch_character = self.switch_character
+        win.on_rescan_characters = self.rescan_characters
         win.show()
 
         tray = self._build_tray(win)
@@ -138,6 +139,7 @@ class PetApp:
         # 用新库创建新窗口/托盘，旧对象延迟销毁
         win = PetWindow(lib, self.config)
         win.on_switch_character = self.switch_character
+        win.on_rescan_characters = self.rescan_characters
         win.show()
 
         tray = self._build_tray(win)
@@ -155,6 +157,19 @@ class PetApp:
             QTimer.singleShot(0, old_tray.deleteLater)
 
         self.app.aboutToQuit.connect(win._save_position)
+
+    # ------------------------------------------------------------ 角色重扫
+    def rescan_characters(self) -> None:
+        """重建托盘菜单，让新放入角色目录的形象立即可选（无需重启）。"""
+        if self.win is None:
+            return
+        ids = catalog.list_available_characters()
+        logging.info('角色目录重新扫描: %s', ids)
+        old_tray = self.tray
+        self.tray = self._build_tray(self.win)
+        if old_tray is not None:
+            old_tray.hide()
+            QTimer.singleShot(0, old_tray.deleteLater)
 
     # ------------------------------------------------------------ 托盘
     def _build_tray(self, win: PetWindow) -> QSystemTrayIcon:
@@ -181,8 +196,23 @@ class PetApp:
             act.setCheckable(True)
             act.setChecked(cid == current)
             act.triggered.connect(lambda checked=False, cid=cid: self.switch_character(cid))
+        m_char.addSeparator()
+        m_char.addAction('打开角色文件夹…', self._open_characters_dir)
+        m_char.addAction('重新扫描角色', self.rescan_characters)
 
         menu.addSeparator()
+
+        physics = menu.addAction('拖动物理')
+        physics.setCheckable(True)
+        physics.setChecked(win.drag_physics)
+        physics.toggled.connect(win.set_drag_physics)
+
+        m_speed = menu.addMenu('播放速度')
+        for sp in catalog.SPEED_STEPS:
+            act = m_speed.addAction(f'{sp:g}x')
+            act.setCheckable(True)
+            act.setChecked(abs(win.speed - sp) < 0.02)
+            act.triggered.connect(lambda checked=False, sp=sp: win.set_speed(sp))
 
         auto = menu.addAction('开机自启')
         auto.setCheckable(True)
@@ -201,6 +231,15 @@ class PetApp:
         )
         tray.show()
         return tray
+
+    def _open_characters_dir(self) -> None:
+        """打开用户角色目录，方便一键安装的用户直接放入自定义角色。"""
+        path = catalog.user_characters_dir()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logging.warning('创建角色目录失败: %s', path)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
 def main(argv: list[str] | None = None) -> int:

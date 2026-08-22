@@ -108,3 +108,8 @@ class MovieLibrary(QObject):
     def movies(self) -> dict[str, WebMClip]:
         """Name -> clip mapping for window wiring."""
         return dict(self._movies)
+
+    def set_speed(self, speed: float) -> None:
+        """统一设置全部动画的播放速率（1.0 = 原速）。"""
+        for clip in self._movies.values():
+            clip.setSpeed(speed)

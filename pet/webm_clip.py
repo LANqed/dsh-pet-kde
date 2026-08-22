@@ -61,6 +61,7 @@ class WebMClip(QObject):
         self._fps = 24.0
 
         # 播放状态
+        self._speed = 1.0
         self._queue: queue.Queue = queue.Queue(maxsize=8)
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
@@ -104,9 +105,21 @@ class WebMClip(QObject):
         self._ensure_meta()
 
     def _timer_interval(self) -> int:
+        speed = self._speed if self._speed > 0 else 1.0
         if self._fps > 0:
-            return max(1, int(round(1000 / self._fps)))
-        return catalog.FRAME_MS
+            return max(1, int(round(1000 / (self._fps * speed))))
+        return max(1, int(round(catalog.FRAME_MS / speed)))
+
+    def setSpeed(self, speed: float) -> None:
+        """设置播放速率（1.0 = 原速）；播放中立即生效。"""
+        speed = max(0.1, float(speed))
+        if abs(speed - self._speed) < 1e-6:
+            return
+        self._speed = speed
+        self._timer.setInterval(self._timer_interval())
+
+    def speed(self) -> float:
+        return self._speed
 
     def frameCount(self) -> int:
         if self._frame_count <= 0:
@@ -125,6 +138,11 @@ class WebMClip(QObject):
         if self._fps <= 0:
             return 0.0
         return self._frame_index / self._fps
+
+    def effectiveDuration(self) -> float:
+        """按当前播放速率折算的实际播放时长（秒）。"""
+        speed = self._speed if self._speed > 0 else 1.0
+        return self.duration() / speed
 
     def currentPixmap(self):
         return self._current_pixmap
@@ -146,6 +164,7 @@ class WebMClip(QObject):
 
         self._thread = threading.Thread(target=self._reader, args=(stop_evt,), daemon=True)
         self._thread.start()
+        self._timer.setInterval(self._timer_interval())
         self._timer.start()
 
     def stop(self) -> None:

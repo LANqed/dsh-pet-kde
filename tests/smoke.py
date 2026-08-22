@@ -38,6 +38,12 @@ def _wait_until(app: QApplication, predicate, timeout: float = 5.0) -> None:
 
 def main() -> int:
     app = QApplication([])
+    video_dir = catalog.resolve_character_video_dir(catalog.DEFAULT_CHARACTER)
+    if not video_dir.is_dir() or not any(video_dir.rglob("*.webm")):
+        # assets/ 不随仓库分发；缺素材时给出明确提示而不是抛栈
+        print(f"跳过：默认角色素材缺失 -> {video_dir}")
+        print("请放入 webm 后重试，或运行 python -m pytest -q（无需素材）。")
+        return 0
     lib = MovieLibrary()  # 真实 webm：assets/videos
 
     # 1. 51 段素材全量可加载，帧数/时长有效
@@ -137,6 +143,39 @@ def main() -> int:
     win._cancel_move()
     win.set_no_move(False)
     assert win.no_move is False and cfg.get("no_move") is False
+
+    # 10. 点击 Q 弹：立即压缩，推进后回到原状
+    win._just_dragged = False
+    win._on_click()
+    assert win._squash_active is True
+    assert win._squash_sy < 1.0 and win._squash_sx > 1.0
+    for _ in range(int(catalog.SQUASH_DURATION / (catalog.ANIM_TICK_MS / 1000.0)) + 5):
+        win._on_fx_tick()
+    assert win._squash_active is False
+    assert win._squash_sx == 1.0 and win._squash_sy == 1.0
+
+    # 11. 播放速率：库内所有 clip 同步生效并持久化
+    win.set_speed(2.0)
+    assert cfg.get("speed") == 2.0
+    for clip in lib.movies().values():
+        assert abs(clip.speed() - 2.0) < 1e-6
+    win.set_speed(1.0)
+
+    # 12. 拖动物理：抛出后受重力落地并停在屏幕内
+    from PySide6.QtGui import QGuiApplication
+
+    avail = QGuiApplication.primaryScreen().availableGeometry()
+    win.set_drag_physics(True)
+    win.move(avail.left() + 200, avail.top() + 40)
+    win._start_fly(600.0, -200.0)
+    for _ in range(2000):
+        if not win._flying:
+            break
+        win._on_fx_tick()
+        assert avail.left() <= win.x() <= avail.right() - win.width() + 1
+        assert avail.top() <= win.y() <= avail.bottom() - win.height() + 1
+    assert win._flying is False
+    assert win.y() == avail.bottom() - win.height() + 1
 
     win.close()
     print("\n=== ALL SMOKE TESTS PASSED ===")

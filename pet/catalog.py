@@ -62,6 +62,35 @@ CORNER_MARGIN = 24  # 距屏幕右缘的默认间距
 # 可选的显示缩放档位（相对裁切区 325 宽：约 163px / 234px / 276px / 325px）
 SCALE_STEPS = (0.5, 0.72, 0.85, 1.0)
 
+# ---------------------------------------------------------------- 交互物理
+# Q 弹 / 拖动物理的驱动步长（约 60fps）
+ANIM_TICK_MS = 16
+
+# 点击 Q 弹：先变矮再复原的阻尼振荡
+SQUASH_AMPLITUDE = 0.18    # 初始压缩比（高度 -18%）
+SQUASH_X_RATIO = 0.55      # 压缩时横向补偿比例（保持体积感）
+SQUASH_TAU = 0.14          # 衰减时间常数（秒）
+SQUASH_OMEGA = 26.0        # 角频率（rad/s）
+SQUASH_DURATION = 0.55     # 总时长（秒）
+
+# 拖动物理：松手抛出 + 重力 + 边界反弹衰减
+GRAVITY = 2600.0           # px/s²
+GROUND_BOUNCE = 0.42       # 触地后垂直速度保留比
+WALL_BOUNCE = 0.50         # 撞墙后水平速度保留比
+GROUND_FRICTION = 0.72     # 触地水平摩擦
+AIR_DRAG = 0.992           # 每步空气阻力
+SETTLE_SPEED = 45.0        # 判定静止的速度阈值（px/s）
+THROW_MIN_SPEED = 120.0    # 低于该速度视为轻放，不抛出
+THROW_MAX_SPEED = 3200.0   # 抛出速度上限
+VELOCITY_WINDOW_SEC = 0.09 # 松手速度的采样窗口（秒）
+
+# 拖拽 / 飞行时的倾斜（惯性、离心感）
+LEAN_MAX_DEG = 14.0
+LEAN_PER_PX_S = 0.012      # 每 px/s 对应的倾斜角度
+
+# 播放速率档位（右键菜单）
+SPEED_STEPS = (1.0, 1.25, 1.5, 1.75, 2.0)
+
 # ---------------------------------------------------------------- 多形象
 # 当前内置形象与未来扩展形象 ID（目录名建议使用稳定 ASCII）
 DEFAULT_CHARACTER = 'deepseek-tan'
@@ -179,6 +208,21 @@ def built_in_characters() -> list[str]:
     ]
 
 
+def user_characters_dir() -> Path:
+    """用户可写的角色目录（一键安装用户放自定义角色的推荐位置）。
+
+    与 external_character_dirs() 的用户数据目录保持一致，
+    这样从菜单“打开角色文件夹”放进去的角色会被自动发现。
+    """
+    if sys.platform == 'win32':
+        data_root = Path(os.environ.get('APPDATA', Path.home())) / 'dsh-pet-standalone'
+    elif sys.platform == 'darwin':
+        data_root = Path.home() / 'Library' / 'Application Support' / 'dsh-pet-standalone'
+    else:
+        data_root = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'dsh-pet-standalone'
+    return data_root / 'characters'
+
+
 def external_character_dirs() -> list[Path]:
     """外部可扩展形象根目录（不存在时返回空列表，不报错）。
 
@@ -192,14 +236,7 @@ def external_character_dirs() -> list[Path]:
     else:
         base = Path.cwd()
     dirs.append(base / 'characters')
-
-    if sys.platform == 'win32':
-        data_root = Path(os.environ.get('APPDATA', Path.home())) / 'dsh-pet-standalone'
-    elif sys.platform == 'darwin':
-        data_root = Path.home() / 'Library' / 'Application Support' / 'dsh-pet-standalone'
-    else:
-        data_root = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'dsh-pet-standalone'
-    dirs.append(data_root / 'characters')
+    dirs.append(user_characters_dir())
     return dirs
 
 

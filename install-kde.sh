@@ -229,9 +229,41 @@ EOF
 
 command -v kbuildsycoca6 >/dev/null 2>&1 && kbuildsycoca6 >/dev/null 2>&1 || true
 
+# 自定义角色目录：预创建并放入说明，方便用户直接拖入新角色。
+USER_CHARACTERS_DIR="$CONFIG_HOME/dsh-pet-standalone/characters"
+mkdir -p "$USER_CHARACTERS_DIR"
+cat > "$USER_CHARACTERS_DIR/README.txt" <<'EOF'
+把自定义角色放在这里，重启 dsh-pet 或使用菜单「切换角色 → 重新扫描角色」即可生效。
+
+目录结构：
+
+  <角色ID>/videos/
+  ├── idle/     待机
+  ├── turn/     转向
+  ├── move/     移动
+  ├── click/    点击回应
+  ├── drag/     拖拽（可选）
+  └── random/   随机动作
+
+也可以把 webm 直接放进 <角色ID>/videos/，程序会按文件名关键词分类。
+若需精确指定，可在 <角色ID>/videos/manifest.json 写：
+
+  {
+    "idle": "待机.webm",
+    "turn": "转身.webm",
+    "moves": ["走路.webm"],
+    "clicks": ["点击回应.webm"],
+    "drag": "拖拽.webm"
+  }
+
+素材要求：透明背景 webm（VP9 + alpha），建议 640x360。
+与内置角色 ID 相同时，这里的版本优先。
+EOF
+
 say "安装完成。"
 say "启动命令: $LAUNCHER"
 say "也可以在 KDE 应用菜单中搜索 dsh-pet。"
+say "自定义角色目录: $USER_CHARACTERS_DIR"
 case ":${PATH}:" in
     *":$BIN_DIR:"*) ;;
     *) say "dsh-pet 命令已注册；重新打开终端后生效。当前终端可执行：export PATH=\"$BIN_DIR:\$PATH\"" ;;

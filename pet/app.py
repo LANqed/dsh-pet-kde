@@ -6,6 +6,9 @@
 - 右键桌宠 →「切换角色」
 - 托盘菜单 →「切换角色」
 切换后会热加载对应形象的 webm，并保留位置/朝向等配置。
+
+AI 对话是可选功能：Chat 版包含 pet/chat*.py，无 Chat 版不含这些文件，
+菜单里的对话相关项会自动隐藏（见 pet/features.py）。
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import autostart as autostart_mod
 from . import catalog
+from . import features
 from .config import Config
 from .kde import configure_platform
 from .library import MovieLibrary
@@ -48,6 +52,50 @@ class PetApp:
         self.win: PetWindow | None = None
         self.tray: QSystemTrayIcon | None = None
         self._locked_action = None  # 托盘「锁定」项，用于反向同步勾选状态
+        self.chat = self._create_chat_controller()
+
+    # ------------------------------------------------------------ AI 对话
+    def _create_chat_controller(self):
+        """Chat 版才创建对话控制器；无 Chat 版返回 None。"""
+        if not features.chat_available():
+            return None
+        try:
+            from .chat_controller import ChatController
+        except Exception:
+            logging.exception('AI 对话模块加载失败，按无 Chat 版运行')
+            return None
+        return ChatController(self.config.dir)
+
+    def has_chat(self) -> bool:
+        return self.chat is not None
+
+    def _chat_enabled(self) -> bool:
+        return self.chat is not None and self.chat.enabled()
+
+    def open_chat_input(self) -> None:
+        if self.chat is None:
+            return
+        if not self.chat.enabled():
+            self.open_chat_settings()
+            return
+        self.chat.toggle_input()
+
+    def open_chat_settings(self) -> None:
+        if self.chat is None:
+            return
+        if self.chat.open_settings(parent=None) and self.chat.enabled() and self.win is not None:
+            self.chat.attach(self.win)
+
+    def clear_chat_history(self) -> None:
+        if self.chat is not None:
+            self.chat.clear_history()
+
+    def _attach_chat(self, win: PetWindow) -> None:
+        """把对话 UI 绑定到（可能是热切换后的新）窗口。"""
+        if self.chat is None:
+            return
+        self.chat.detach()
+        self.chat.attach(win)
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -71,6 +119,7 @@ class PetApp:
         win.on_switch_character = self.switch_character
         win.on_rescan_characters = self.rescan_characters
         win.on_locked_changed = self.sync_locked_action
+        win.on_chat_requested = self.open_chat_input if self.has_chat() else None
         win.show()
 
         tray = self._build_tray(win)
@@ -88,6 +137,7 @@ class PetApp:
             if old_tray is not None:
                 QTimer.singleShot(0, old_tray.deleteLater)
 
+        self._attach_chat(win)
         self.app.aboutToQuit.connect(win._save_position)
 
     # ------------------------------------------------------------ 角色切换
@@ -117,6 +167,7 @@ class PetApp:
         win.on_switch_character = self.switch_character
         win.on_rescan_characters = self.rescan_characters
         win.on_locked_changed = self.sync_locked_action
+        win.on_chat_requested = self.open_chat_input if self.has_chat() else None
         win.show()
 
         tray = self._build_tray(win)
@@ -133,6 +184,7 @@ class PetApp:
         if old_tray is not None:
             QTimer.singleShot(0, old_tray.deleteLater)
 
+        self._attach_chat(win)
         self.app.aboutToQuit.connect(win._save_position)
 
     # ------------------------------------------------------------ 角色重扫
@@ -160,6 +212,13 @@ class PetApp:
 
         menu = QMenu()
         menu.addAction('显示 / 隐藏', toggle_visible)
+
+        if self.has_chat():
+            m_chat = menu.addMenu('AI 对话')
+            m_chat.addAction('说句话…', self.open_chat_input)
+            m_chat.addAction('清空对话历史', self.clear_chat_history)
+            m_chat.addSeparator()
+            m_chat.addAction('设置…', self.open_chat_settings)
 
         locked = menu.addAction('锁定（鼠标穿透）')
         locked.setCheckable(True)
@@ -240,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
 
     config = Config()
     _setup_logging(config)
-    logging.info('dsh-pet-standalone 启动')
+    logging.info('dsh-pet-standalone 启动（版本: %s）', features.edition())
 
     controller = PetApp(app, config)
     try:

@@ -6,12 +6,35 @@
 
 > 目前只在 Alpine Edge、KDE Plasma 6.7.4、Wayland + XWayland 环境中实机验证过。
 
+## 两个版本
+
+| 版本 | 适合 | 说明 |
+| --- | --- | --- |
+| **Chat 版** | 想体验完整功能（含 AI 对话） | 桌宠 + AI 对话气泡，可接任意 OpenAI 兼容接口 |
+| **无 Chat 版** | 只需要桌宠陪伴 | 不含对话模块，包体更小、启动更轻 |
+
+两个版本共用同一份配置与角色素材，可以随时换装，位置和设置都会保留。
+
 ## 安装
 
-无需克隆仓库，一行命令安装：
+无需克隆仓库，一行命令安装。
+
+**无 Chat 版**（只要桌宠陪伴）：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde.sh | bash
+```
+
+**Chat 版**（含 AI 对话）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde-chat.sh | bash
+```
+
+也可以用主安装器加参数装 Chat 版：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde.sh | bash -s -- --with-chat
 ```
 
 安装器会下载程序和默认角色素材，检查或安装 Python、PySide6、imageio-ffmpeg、ffmpeg 与 XWayland，然后创建：
@@ -19,6 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde
 - 程序目录：`${XDG_DATA_HOME:-~/.local/share}/dsh-pet`
 - 启动命令：`~/.local/bin/dsh-pet`
 - KDE 应用菜单项：`dsh-pet`
+- 版本标记：`${XDG_DATA_HOME:-~/.local/share}/dsh-pet/EDITION`（`chat` 或 `lite`）
 
 安装器会按需将 `~/.local/bin` 注册到 `~/.profile`，重新打开终端后可以直接执行 `dsh-pet`。
 当前终端尚未刷新环境时执行：
@@ -35,13 +59,15 @@ export PATH="$HOME/.local/bin:$PATH"
 curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde.sh | bash -s -- --no-launch
 ```
 
+**切换版本**：直接用另一个安装器重跑即可，配置和角色素材不会丢。
+
 卸载并保留配置：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde.sh | bash -s -- --uninstall
 ```
 
-完全卸载，包括配置、日志和位置记录：
+完全卸载，包括配置、日志、对话设置和位置记录：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/LANqed/dsh-pet-kde/main/install-kde.sh | bash -s -- --uninstall --purge
@@ -71,6 +97,7 @@ Windows 与 macOS 请使用原项目发布的安装包：**[MerZlin/dsh-pet-inde
 - 窗口：透明无边框、可切换置顶、4 档大小；不显示在 KDE 任务管理器 / 底部 dock
 - 系统托盘：显示/隐藏、锁定、切换角色、拖动物理、播放速度、开机自启、退出
 - 自动持久化：位置、朝向、缩放、置顶、移动开关、锁定、播放速率、拖动物理、当前角色
+- **AI 对话（仅 Chat 版）**：头顶气泡对话，跟随桌宠移动；接任意 OpenAI 兼容接口，支持人设提示与多轮上下文
 
 ## 使用
 
@@ -82,6 +109,48 @@ Windows 与 macOS 请使用原项目发布的安装包：**[MerZlin/dsh-pet-inde
 - 锁定：选择“锁定并穿透鼠标”后，整个窗口不再接收鼠标；通过托盘取消“锁定（鼠标穿透）”解锁
 - 播放速度：右键或托盘菜单 →「播放速度」，1.0x ~ 2.0x 立即生效
 - 拖动物理：右键或托盘菜单 →「拖动物理」可随时开关；关闭后松手停在原地
+- 对话（Chat 版）：右键桌宠 →「和它说话…」，或托盘 →「AI 对话 → 说句话…」。Enter 发送，Esc 关闭输入框
+
+## AI 对话（Chat 版）
+
+首次使用需要填接口：托盘 →「AI 对话 → 设置…」。
+
+配置写在 `${XDG_CONFIG_HOME:-~/.config}/dsh-pet-standalone/chat.json`（含 API key，权限 `600`）：
+
+```json
+{
+  "enabled": true,
+  "base_url": "https://api.deepseek.com/v1",
+  "model": "deepseek-chat",
+  "api_key": "sk-...",
+  "system_prompt": "你是一只住在用户桌面上的桌宠……",
+  "max_history": 12,
+  "timeout": 30
+}
+```
+
+任何 OpenAI 兼容的 `/v1/chat/completions` 端点都可以用：
+
+| 服务 | base_url | model | api_key |
+| --- | --- | --- | --- |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` | 必填 |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | 必填 |
+| Ollama（本地） | `http://localhost:11434/v1` | `qwen2.5` | 留空 |
+| OpenRouter | `https://openrouter.ai/api/v1` | 任选 | 必填 |
+
+也可以用环境变量覆盖，适合不想把 key 写进文件的情况：
+
+```sh
+DSH_PET_CHAT_API_KEY=sk-... DSH_PET_CHAT_BASE_URL=https://api.deepseek.com/v1 dsh-pet
+```
+
+说明：
+
+- 请求走后台线程，不会卡住动画；等待期间气泡显示「让我想想…」
+- `max_history` 控制携带的历史条数，设 0 则每次都是新对话
+- 指向 `localhost`/`127.0.0.1` 时自动绕过系统代理，避免本地模型被 `http_proxy` 拦截
+- 只用 Python 标准库 `urllib`，Chat 版不增加任何第三方依赖
+- 报错会直接显示在气泡里（401 key 无效、404 地址或模型不对、429 限流、网络不通等）
 
 ### KDE Wayland 说明
 
@@ -191,6 +260,8 @@ ${XDG_CONFIG_HOME:-~/.config}/autostart/com.merzlin.dsh-pet-standalone.desktop
 - Q 弹与拖动物理共用一个 60fps 定时器，空闲时自动停止
 - Q 弹以脚底中点为锚做纵向压缩与横向补偿，角色不会离地
 - 抛飞按每步积分重力与空气阻力，撞到屏幕可用区边界按系数反弹，速度低于阈值即静止并保存位置
+- 对话气泡与输入框是独立的无边框 Tool 窗口，不干扰桌宠自身的透明与 mask 逻辑
+- 对话请求在后台线程执行，用请求代次（generation）丢弃过期结果，避免旧回复覆盖新提问
 
 ffmpeg 必须在输入前指定 `libvpx-vp9`，否则可能丢失 WebM alpha：
 
@@ -206,21 +277,28 @@ imageio_ffmpeg.read_frames(
 ## 项目结构
 
 ```text
-├── install-kde.sh          # KDE/Linux 一键安装器
+├── install-kde.sh          # 一键安装器（默认无 Chat 版，--with-chat 装 Chat 版）
+├── install-kde-chat.sh     # Chat 版安装器（等价于 --with-chat）
 ├── pet/
 │   ├── app.py              # 应用入口与系统托盘
-│   ├── autostart.py        # 跨平台开机自启
+│   ├── autostart.py        # XDG 开机自启
 │   ├── catalog.py          # 角色发现、动画分类与常量
 │   ├── config.py           # 配置持久化
+│   ├── features.py         # 可选功能探测（Chat 版 / 无 Chat 版）
 │   ├── kde.py              # Plasma Wayland/XWayland 兼容
 │   ├── library.py          # WebM 素材库
 │   ├── webm_clip.py        # WebM 解码与播放
 │   ├── window.py           # 窗口、动画状态机、Q 弹与拖动物理
-│   └── x11_hints.py        # X11 任务栏跳过提示
+│   ├── x11_hints.py        # X11 任务栏跳过提示
+│   ├── chat.py             # 仅 Chat 版：OpenAI 兼容后端
+│   ├── chat_ui.py          # 仅 Chat 版：气泡、输入框、设置对话框
+│   └── chat_controller.py  # 仅 Chat 版：对话与桌宠的粘合层
 ├── assets/characters/      # 内置角色素材
 ├── tests/                  # 单元测试与 GUI 冒烟测试
 └── requirements.txt
 ```
+
+两个版本共用同一份代码。无 Chat 版由安装器不复制 `chat.py`、`chat_ui.py`、`chat_controller.py` 实现；`pet/features.py` 探测不到这些模块时自动隐藏所有对话入口。
 
 ## 验证
 
@@ -228,6 +306,7 @@ imageio_ffmpeg.read_frames(
 python -m pytest -q
 QT_QPA_PLATFORM=xcb python tests/smoke.py
 sh -n install-kde.sh
+sh -n install-kde-chat.sh
 ```
 
 `pytest` 不需要素材即可运行；`tests/smoke.py` 需要默认角色的 WebM，缺失时会跳过并提示。

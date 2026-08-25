@@ -43,6 +43,7 @@ class PetWindow(QWidget):
         self.on_switch_character = None  # 由 app 注入，用于运行时切换角色
         self.on_rescan_characters = None  # 由 app 注入，重新扫描角色目录
         self.on_locked_changed = None  # 由 app 注入，同步托盘勾选状态
+        self.on_chat_requested = None  # 由 app 注入（仅 Chat 版），打开对话输入框
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
         self._use_native_mask = not (
             'kde' in desktop or os.environ.get('KDE_FULL_SESSION')
@@ -763,6 +764,11 @@ class PetWindow(QWidget):
         """构造右键菜单（不弹出），便于复用与测试。"""
         menu = QMenu(self)
 
+        # 仅 Chat 版注入了回调；无 Chat 版不显示该项
+        if self.on_chat_requested is not None:
+            menu.addAction('和它说话…', self._request_chat)
+            menu.addSeparator()
+
         if self.idles:
             m_idle = menu.addMenu('动画 · 待机')
             for n in self.idles:
@@ -863,6 +869,11 @@ class PetWindow(QWidget):
         logging.info('重新扫描角色: %s', ids)
         if self.on_rescan_characters is not None:
             self.on_rescan_characters()
+
+    def _request_chat(self) -> None:
+        """打开 AI 对话输入框（仅 Chat 版有回调）。"""
+        if self.on_chat_requested is not None:
+            self.on_chat_requested()
 
     def _request_quit(self) -> None:
         self._save_position()

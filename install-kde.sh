@@ -6,6 +6,13 @@ REPO_URL=${DSH_PET_REPO_URL:-"https://github.com/LANqed/dsh-pet-kde"}
 REPO_REF=${DSH_PET_REPO_REF:-main}
 UPSTREAM_ASSETS_URL=${DSH_PET_ASSETS_URL:-"https://github.com/PC2005-cloud/dsh-pet/archive/refs/heads/main.tar.gz"}
 
+# 版本：lite=无 Chat（更小更轻），chat=含 AI 对话。
+# install-kde-chat.sh 会把它设为 chat；也可手动 DSH_PET_EDITION=chat 或传 --with-chat。
+EDITION=${DSH_PET_EDITION:-lite}
+
+# 仅 Chat 版需要的模块
+CHAT_MODULES="chat.py chat_ui.py chat_controller.py"
+
 say() {
     printf '%s\n' "$*"
 }
@@ -110,8 +117,16 @@ case "${1:-}" in
         exit 0
         ;;
     --help|-h)
-        say "用法: ./install-kde.sh [--uninstall [--purge]] [--no-launch]"
+        say "用法: ./install-kde.sh [--with-chat] [--no-launch] [--uninstall [--purge]]"
+        say ""
+        say "  --with-chat   安装 Chat 版（含 AI 对话）；默认安装无 Chat 版"
+        say "  --no-launch   安装后不自动启动"
+        say "  --uninstall   卸载（加 --purge 一并删除配置与日志）"
         exit 0
+        ;;
+    --with-chat)
+        EDITION=chat
+        shift
         ;;
     ""|--no-launch)
         ;;
@@ -120,6 +135,20 @@ case "${1:-}" in
         exit 2
         ;;
 esac
+
+case "${1:-}" in
+    ""|--no-launch) ;;
+    *)
+        say "未知参数: $1"
+        exit 2
+        ;;
+esac
+
+if [ "$EDITION" = "chat" ]; then
+    say "版本：Chat 版（含 AI 对话）"
+else
+    say "版本：无 Chat 版（更小、启动更轻）"
+fi
 
 if [ ! -d "$SCRIPT_DIR/pet" ]; then
     say "安装失败：脚本必须放在项目根目录运行。"
@@ -181,6 +210,15 @@ mkdir -p "$INSTALL_DIR/assets" "$BIN_DIR" "$DATA_HOME/applications"
 cp -R "$SCRIPT_DIR/pet" "$INSTALL_DIR/pet"
 cp -R "$SCRIPT_DIR/assets/characters" "$INSTALL_DIR/assets/characters"
 cp "$SCRIPT_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt"
+
+# 无 Chat 版：直接不安装对话模块。pet/features.py 探测不到就隐藏相关菜单。
+if [ "$EDITION" != "chat" ]; then
+    for module in $CHAT_MODULES; do
+        rm -f "$INSTALL_DIR/pet/$module"
+    done
+    rm -rf "$INSTALL_DIR/pet/__pycache__"
+fi
+printf '%s\n' "$EDITION" > "$INSTALL_DIR/EDITION"
 
 if [ "$IS_ALPINE" -eq 1 ]; then
     PYTHON=$(command -v python3)
@@ -264,11 +302,17 @@ say "安装完成。"
 say "启动命令: $LAUNCHER"
 say "也可以在 KDE 应用菜单中搜索 dsh-pet。"
 say "自定义角色目录: $USER_CHARACTERS_DIR"
+if [ "$EDITION" = "chat" ]; then
+    say "AI 对话：右键桌宠「和它说话…」，或托盘「AI 对话 → 设置…」填接口。"
+    say "对话配置文件: $CONFIG_HOME/dsh-pet-standalone/chat.json"
+else
+    say "当前是无 Chat 版；需要 AI 对话请改用 install-kde-chat.sh 重新安装。"
+fi
 case ":${PATH}:" in
     *":$BIN_DIR:"*) ;;
     *) say "dsh-pet 命令已注册；重新打开终端后生效。当前终端可执行：export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
-say "卸载命令: $SCRIPT_DIR/install-kde.sh --uninstall"
+say "卸载命令: dsh-pet 安装器 --uninstall"
 
 if [ "${1:-}" != "--no-launch" ]; then
     "$LAUNCHER" >/dev/null 2>&1 &

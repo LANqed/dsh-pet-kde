@@ -320,6 +320,28 @@ def test_context_menu_exposes_new_features(win):
     assert "锁定并穿透鼠标" in items
 
 
+def test_chat_menu_hidden_without_callback(win):
+    """无 Chat 版不注入回调，右键菜单不应出现对话项。"""
+    win.on_chat_requested = None
+    items, _ = _menu_snapshot(win)
+    assert "和它说话…" not in items
+
+
+def test_chat_menu_shown_and_triggers_callback(win):
+    called = []
+    win.on_chat_requested = lambda: called.append(1)
+    items, _ = _menu_snapshot(win)
+    assert "和它说话…" in items
+
+    menu = win.build_context_menu()
+    try:
+        action = next(a for a in menu.actions() if a.text() == "和它说话…")
+        action.trigger()
+    finally:
+        menu.deleteLater()
+    assert called == [1]
+
+
 def test_context_menu_speed_checked_matches_state(win):
     win.set_speed(1.5)
     _, subs = _menu_snapshot(win)

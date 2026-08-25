@@ -22,12 +22,13 @@ import os
 import random
 import time
 
-from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import QBitmap, QDesktopServices, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from . import autostart as autostart_mod
 from . import catalog
+from . import webm_clip
 from . import x11_hints
 from .config import Config
 from .library import MovieLibrary
@@ -44,6 +45,7 @@ class PetWindow(QWidget):
         self.on_rescan_characters = None  # 由 app 注入，重新扫描角色目录
         self.on_locked_changed = None  # 由 app 注入，同步托盘勾选状态
         self.on_chat_requested = None  # 由 app 注入（仅 Chat 版），打开对话输入框
+        self.on_speech_requested = None  # 由 app 注入，用气泡说一句话
         desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
         self._use_native_mask = not (
             'kde' in desktop or os.environ.get('KDE_FULL_SESSION')
@@ -91,8 +93,12 @@ class PetWindow(QWidget):
         self.no_move: bool = bool(config.get('no_move', False))  # 不移动：禁用自动移动
         self.speed: float = float(config.get('speed', 1.0))      # 播放速率 1.0x~2.0x
         self.drag_physics: bool = bool(config.get('drag_physics', True))
+        self.idle_gap: float = float(config.get('idle_gap', 0.0))  # 动作等待间隔（秒）
+        self._last_action_ts: float = 0.0
         self.movie = None
         self._frame_pixmap: QPixmap | None = None
+        self._placeholder: QPixmap | None = None
+        self._visible_rect_cache: tuple[tuple, QRect] | None = None
         self._mask_initialized = False
         self._ended_fired = False
         lib.set_speed(self.speed)
@@ -122,6 +128,11 @@ class PetWindow(QWidget):
         self._fx_timer = QTimer(self)
         self._fx_timer.setInterval(catalog.ANIM_TICK_MS)
         self._fx_timer.timeout.connect(self._on_fx_tick)
+
+        # 置顶自检：合成器重启/分辨率变更/休眠唤醒后置顶可能被丢弃
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.setInterval(catalog.TOPMOST_CHECK_MS)
+        self._topmost_timer.timeout.connect(self._check_topmost)
 
         # ---- 移动驱动 ----
         self._move_plan: dict | None = None
@@ -215,12 +226,53 @@ class PetWindow(QWidget):
         self.show()
         if on:
             self.raise_()
+            # Qt 的 flag 可能被 WM 忽略，显式补一次 EWMH 请求
+            QTimer.singleShot(0, lambda: x11_hints.set_above(int(self.winId())))
+        self._sync_topmost_watchdog()
 
     def showEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         """窗口显示时请求跳过任务栏，避免出现在任务管理器/底部 dock。"""
         super().showEvent(event)
         # setWindowFlag 重建原生窗口后 XID 变化，故每次显示都重新应用。
         QTimer.singleShot(0, lambda: x11_hints.skip_taskbar(int(self.winId())))
+        if self.cfg.get('on_top', True):
+            QTimer.singleShot(0, lambda: x11_hints.set_above(int(self.winId())))
+        self._sync_topmost_watchdog()
+
+    # ---------------------------------------------------------- 置顶自检
+    def _sync_topmost_watchdog(self) -> None:
+        """置顶开启且窗口可见时才跑 watchdog。"""
+        want = bool(self.cfg.get('on_top', True)) and self.isVisible()
+        if want and not self._topmost_timer.isActive():
+            self._topmost_timer.start()
+        elif not want and self._topmost_timer.isActive():
+            self._topmost_timer.stop()
+
+    def _check_topmost(self) -> None:
+        """周期自检：合成器重启 / 分辨率变更 / 休眠唤醒后置顶可能被丢弃。
+
+        只在能明确读到「已丢失」时才重设；查不到状态（原生 Wayland 等）
+        直接停掉 watchdog，避免无意义的空转。
+        """
+        if not self.isVisible() or not self.cfg.get('on_top', True):
+            self._topmost_timer.stop()
+            return
+        wid = int(self.winId())
+        state = x11_hints.is_above(wid)
+        if state is None:
+            self._topmost_timer.stop()  # 该平台无法查询，放弃自检
+            return
+        if state is False:
+            logging.info('检测到置顶丢失，重新请求 _NET_WM_STATE_ABOVE')
+            x11_hints.set_above(wid)
+            self.raise_()
+
+    def bring_to_front(self) -> None:
+        """把桌宠抬到置顶层最前（点击/拖拽结束时调用，不抢键盘焦点）。"""
+        if self.locked or not self.cfg.get('on_top', True):
+            return
+        self.raise_()
+        x11_hints.set_above(int(self.winId()))
 
     def set_no_move(self, on: bool) -> None:
         """切换「不移动」：禁用自动移动；勾选瞬间若正在移动则立即停下回待机。"""
@@ -249,6 +301,9 @@ class PetWindow(QWidget):
             self.show()
             if self.cfg.get('on_top', True):
                 self.raise_()
+        if on and self.on_speech_requested is not None:
+            # 锁定后无法点击桌宠，提示解锁入口在托盘
+            self.on_speech_requested('已锁定，鼠标会穿透；解锁请用系统托盘菜单。')
         # 通知 app 同步托盘勾选：从右键菜单锁定时托盘不会自己更新
         if self.on_locked_changed is not None:
             self.on_locked_changed(on)
@@ -287,6 +342,8 @@ class PetWindow(QWidget):
         movie.stop()
         movie.jumpToFrame(0)
         self._ended_fired = False
+        if self._is_action_anim(name):
+            self._last_action_ts = time.monotonic()
         self._rebuild_frame()
         movie.start()
 
@@ -306,7 +363,12 @@ class PetWindow(QWidget):
         if self.movie is None:
             return
         pm = self.movie.currentPixmap()
-        if pm.isNull():
+        if pm is None or pm.isNull():
+            # ffmpeg 被安全软件隔离/解码失败时 currentPixmap 会是 None。
+            # 不能让它冒泡成 AttributeError，改为保留上一帧或显示占位画面。
+            if self._frame_pixmap is None:
+                self._frame_pixmap = self._placeholder_pixmap()
+                self._sync_mask(force=True)
             return
         img = pm.toImage()
         if self.facing == 'right':
@@ -327,6 +389,35 @@ class PetWindow(QWidget):
         )
         self._sync_mask()
 
+    def _placeholder_pixmap(self) -> QPixmap:
+        """解码不可用时的兜底画面（缓存一份，避免每帧重绘）。"""
+        if self._placeholder is None:
+            label = str(self.cfg.get('character', catalog.DEFAULT_CHARACTER))
+            self._placeholder = webm_clip.placeholder_pixmap(label, self._w, self._h)
+        return self._placeholder
+
+    def _squash_geometry(self) -> tuple[float, float, float]:
+        """返回 (sx, sy, lean)。
+
+        注意：sx 不放大。窗口尺寸与 mask 固定，宽度放大会让角色边缘溢出窗口
+        被裁成透明边。压缩时只压高度，横向最多回到 1.0。
+        """
+        sx = min(1.0, self._squash_sx)
+        return sx, self._squash_sy, self._lean_deg
+
+    def _has_squash_transform(self) -> bool:
+        sx, sy, lean = self._squash_geometry()
+        return abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3 or abs(lean) > 1e-3
+
+    def _apply_squash_transform(self, painter: QPainter) -> None:
+        """以脚底中点为锚应用 Q 弹压缩与惯性倾斜。"""
+        sx, sy, lean = self._squash_geometry()
+        painter.translate(self._w / 2.0, float(self._h))
+        if abs(lean) > 1e-3:
+            painter.rotate(lean)
+        painter.scale(sx, sy)
+        painter.translate(-self._w / 2.0, -float(self._h))
+
     def _sync_mask(self, force: bool = False) -> None:
         """按当前帧 alpha 设置窗口 mask：透明区域鼠标穿透到下层窗口。"""
         if not self._use_native_mask:
@@ -337,11 +428,18 @@ class PetWindow(QWidget):
             if not self.mask().isNull():
                 self.clearMask()
             return
-        if self._dragging or (self._mask_initialized and not force):
+        squashing = self._has_squash_transform()
+        if self._dragging:
+            return
+        # Q 弹期间必须每帧重算 mask：否则压扁后下移的耳朵/头顶装饰会被
+        # 上一帧的原始 mask 裁掉，点击穿透区域也会与可见画面不一致。
+        if self._mask_initialized and not force and not squashing:
             return
         canvas = QImage(self._w, self._h, QImage.Format.Format_ARGB32)
         canvas.fill(Qt.GlobalColor.transparent)
         p = QPainter(canvas)
+        if squashing:
+            self._apply_squash_transform(p)
         if self._frame_pixmap is not None:
             p.drawPixmap(0, 0, self._frame_pixmap)
         p.end()
@@ -352,7 +450,7 @@ class PetWindow(QWidget):
             Qt.ImageConversionFlag.MonoOnly | Qt.ImageConversionFlag.ThresholdDither
         )
         self.setMask(QBitmap.fromImage(alpha_mask))
-        self._mask_initialized = True
+        self._mask_initialized = not squashing
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
         painter = QPainter(self)
@@ -364,24 +462,19 @@ class PetWindow(QWidget):
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         if self._frame_pixmap is not None:
-            sx, sy = self._squash_sx, self._squash_sy
-            lean = self._lean_deg
-            if abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3 or abs(lean) > 1e-3:
-                # 以脚底中点为锚：Q 弹压缩与惯性倾斜都不该让角色离地
-                painter.translate(self._w / 2.0, float(self._h))
-                if abs(lean) > 1e-3:
-                    painter.rotate(lean)
-                painter.scale(sx, sy)
-                painter.translate(-self._w / 2.0, -float(self._h))
+            if self._has_squash_transform():
+                self._apply_squash_transform(painter)
             # 内容已裁切到脚贴底线的区域，直接铺满窗口
             painter.drawPixmap(0, 0, self._frame_pixmap)
         painter.end()
 
     def icon_pixmap(self, size: int = 64) -> QPixmap:
-        """托盘图标：取当前帧（无则待机首帧）缩放。"""
+        """托盘图标：取当前帧（无则待机首帧，再无则占位画面）。"""
         pm = self._frame_pixmap
-        if pm is None and self.idle:
+        if (pm is None or pm.isNull()) and self.idle:
             pm = self.lib.movie(self.idle).currentPixmap()
+        if pm is None or pm.isNull():
+            pm = self._placeholder_pixmap()
         return pm.scaled(size, size,
                          Qt.AspectRatioMode.KeepAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
@@ -408,7 +501,18 @@ class PetWindow(QWidget):
         """动画链：30% 待机 / 10% 转向 / 40% 动作 / 20% 移动（空间不够回退动作）。
 
         「不移动」模式下跳过移动分支，其概率并入动作 → 30% 待机 / 10% 转向 / 60% 动作。
+        「动作等待间隔」>0 时，相邻的非待机/非转向动画之间会插入等待；
+        等待期间只播待机和转向，不阻塞拖动、点击与菜单。
         """
+        if self.idle_gap > 0 and self._gap_blocking():
+            # 等待窗口内：只走待机/转向，节奏放缓
+            if self.idles:
+                self._switch(self._pick(self.idles, exclude=self.anim))
+                return
+            if self.turns:
+                self._switch(self._pick(self.turns, exclude=self.anim))
+                return
+
         roll = random.random()
         if roll < catalog.P_IDLE:
             if self.idles:
@@ -425,6 +529,25 @@ class PetWindow(QWidget):
         else:
             if self.no_move or not self._try_move():
                 self._switch(self._pick(self.acts, exclude=self.anim))
+
+    def _gap_blocking(self) -> bool:
+        """距上一次非待机动画是否还没到等待间隔。"""
+        if self._last_action_ts <= 0:
+            return False
+        return (time.monotonic() - self._last_action_ts) < self.idle_gap
+
+    def _is_action_anim(self, name: str) -> bool:
+        """是否算作「动作」（用于等待间隔计时）：非待机、非转向。"""
+        return bool(name) and name not in self.idles and name not in self.turns
+
+    def set_idle_gap(self, seconds: float) -> None:
+        """设置相邻非待机动画之间的等待间隔（秒）；0 = 连续播放。"""
+        seconds = max(0.0, float(seconds))
+        if abs(seconds - self.idle_gap) < 1e-6:
+            return
+        self.idle_gap = seconds
+        self.cfg.set('idle_gap', seconds)
+        self.cfg.save()
 
     @staticmethod
     def _pick(pool: list[str], exclude: str | None = None) -> str:
@@ -723,6 +846,7 @@ class PetWindow(QWidget):
         self._samples = []
         self._mask_initialized = False
         self._sync_mask()
+        self.bring_to_front()  # 点击/拖拽结束把桌宠带回置顶最前
         self._press_global = None
         self._grab_offset = None
         event.accept()
@@ -731,17 +855,21 @@ class PetWindow(QWidget):
         self._just_dragged = False
 
     def _on_click(self) -> None:
-        """真点击 → Q 弹反馈 + 随机一个点击回应动画。"""
+        """真点击 → 切到点击回应动画后再 Q 弹。
+
+        顺序很重要：必须先 _switch() 再 trigger_squash()，否则压扁的是
+        上一段动画的旧帧，视觉上像“残留一帧再变形”。
+        """
         if self._just_dragged:
             return
-        # Q 弹独立于动画链：连点也能立刻重复触发挤压回弹
+        can_switch = bool(self.clicks) and not (
+            self.idles and self.anim not in self.idles and self.anim not in self.clicks
+        )
+        if can_switch:
+            self._cancel_move()
+            self._switch(self._pick(self.clicks))
+        # Q 弹独立于动画链：链上非待机动画播放中也给反馈，连点可重复触发
         self.trigger_squash()
-        if not self.clicks:
-            return
-        if self.idles and self.anim not in self.idles and self.anim not in self.clicks:
-            return  # 链上非待机动画播放中不打断
-        self._cancel_move()
-        self._switch(self._pick(self.clicks))
 
     def _is_character_pixel(self, point: QPoint) -> bool:
         """当前窗口坐标是否落在角色可见像素上。"""
@@ -752,6 +880,49 @@ class PetWindow(QWidget):
         if x < 0 or y < 0 or x >= self._frame_pixmap.width() or y >= self._frame_pixmap.height():
             return False
         return self._frame_pixmap.toImage().pixelColor(x, y).alpha() >= 8
+
+    def visible_local_rect(self) -> QRect:
+        """当前帧中角色可见像素的包围盒（窗口本地坐标）。
+
+        气泡定位用它而不是窗口矩形：裁切后四周仍有留白，
+        直接用窗口顶边会让气泡离头顶偏远。结果按帧缓存。
+        """
+        pm = self._frame_pixmap
+        if pm is None or pm.isNull():
+            return QRect(0, 0, self._w, self._h)
+        key = (pm.cacheKey(), self._w, self._h)
+        if self._visible_rect_cache is not None and self._visible_rect_cache[0] == key:
+            return self._visible_rect_cache[1]
+
+        image = pm.toImage()
+        width, height = image.width(), image.height()
+        step = 2  # 采样步长：包围盒不需要逐像素精确
+        min_x, min_y = width, height
+        max_x = max_y = -1
+        for y in range(0, height, step):
+            for x in range(0, width, step):
+                if image.pixelColor(x, y).alpha() >= 8:
+                    if x < min_x:
+                        min_x = x
+                    if x > max_x:
+                        max_x = x
+                    if y < min_y:
+                        min_y = y
+                    if y > max_y:
+                        max_y = y
+        if max_x < 0:
+            rect = QRect(0, 0, self._w, self._h)
+        else:
+            rect = QRect(min_x, min_y,
+                         max(1, max_x - min_x + 1),
+                         max(1, max_y - min_y + 1))
+        self._visible_rect_cache = (key, rect)
+        return rect
+
+    def visible_global_rect(self) -> QRect:
+        """角色可见像素包围盒的全局坐标（供气泡/对话窗定位）。"""
+        rect = self.visible_local_rect()
+        return QRect(self.mapToGlobal(rect.topLeft()), rect.size())
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         if self.locked or not self._is_character_pixel(event.pos()):
@@ -834,6 +1005,14 @@ class PetWindow(QWidget):
             act.setChecked(abs(self.speed - sp) < 0.02)
             act.triggered.connect(lambda checked=False, sp=sp: self.set_speed(sp))
 
+        m_gap = menu.addMenu('动作等待间隔')
+        for gap in catalog.IDLE_GAP_STEPS:
+            label = '连续播放' if gap <= 0 else f'{gap:g}s'
+            act = m_gap.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(abs(self.idle_gap - gap) < 0.05)
+            act.triggered.connect(lambda checked=False, gap=gap: self.set_idle_gap(gap))
+
         m_scale = menu.addMenu('大小')
         for s in catalog.SCALE_STEPS:
             px = int(round(catalog.CONTENT_W * s))
@@ -881,5 +1060,6 @@ class PetWindow(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._fx_timer.stop()
+        self._topmost_timer.stop()
         self._save_position()
         super().closeEvent(event)

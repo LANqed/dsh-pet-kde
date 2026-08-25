@@ -23,9 +23,11 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from . import autostart as autostart_mod
 from . import catalog
 from . import features
+from . import webm_clip
 from .config import Config
 from .kde import configure_platform
 from .library import MovieLibrary
+from .speech_bubble import SpeechScheduler
 from .window import PetWindow
 
 
@@ -43,6 +45,26 @@ def _show_startup_error(title: str, message: str) -> None:
     QMessageBox.critical(None, title, message)
 
 
+def _check_ffmpeg_available() -> None:
+    """启动自检：ffmpeg 缺失/被安全软件隔离时明确提示，但不阻止运行。
+
+    程序会退化为占位画面，桌宠仍可见可交互。
+    """
+    ok, detail = webm_clip.ffmpeg_status()
+    if ok:
+        logging.info('ffmpeg 可用: %s', detail)
+        return
+    logging.warning('ffmpeg 不可用: %s', detail)
+    QMessageBox.warning(
+        None,
+        'dsh-pet 动画解码不可用',
+        '未能启用视频解码组件，桌宠将显示占位画面。\n\n'
+        f'原因：{detail}\n\n'
+        '常见原因是 ffmpeg 被安全软件隔离或删除；'
+        '请在安全软件中恢复/信任后重启，或安装系统 ffmpeg。',
+    )
+
+
 class PetApp:
     """管理桌宠窗口、托盘与角色热切换。"""
 
@@ -52,6 +74,7 @@ class PetApp:
         self.win: PetWindow | None = None
         self.tray: QSystemTrayIcon | None = None
         self._locked_action = None  # 托盘「锁定」项，用于反向同步勾选状态
+        self.speech: SpeechScheduler | None = None
         self.chat = self._create_chat_controller()
 
     # ------------------------------------------------------------ AI 对话
@@ -97,6 +120,37 @@ class PetApp:
         self.chat.detach()
         self.chat.attach(win)
 
+    # ------------------------------------------------------------ 自言自语
+    def _attach_speech(self, win: PetWindow) -> None:
+        """自言自语调度器绑定新窗口（两个版本都有）。"""
+        if self.speech is not None:
+            self.speech.stop()
+        self.speech = SpeechScheduler(win, self.config)
+        self.speech.start()
+
+    def toggle_speech(self, on: bool) -> None:
+        if self.speech is not None:
+            self.speech.set_enabled(on)
+
+    def say_now(self) -> None:
+        if self.speech is not None:
+            self.speech.say_now()
+
+    def say(self, text: str) -> None:
+        """让桌宠用气泡说一句指定文本（窗口层提示也走这里）。"""
+        if self.speech is not None:
+            self.speech._show(text)
+
+    def open_speech_settings(self) -> None:
+        if self.win is None:
+            return
+        from .speech_settings import SpeechSettingsDialog
+
+        dialog = SpeechSettingsDialog(self.config, self.speech, parent=None)
+        if dialog.exec() and self.speech is not None:
+            self.speech.stop()
+            self.speech.start()
+
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
         character_id = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
@@ -111,6 +165,8 @@ class PetApp:
     def _create_library(self, character_id: str) -> MovieLibrary:
         lib = MovieLibrary(character_id=character_id)
         logging.info('素材加载完成：%s %d 段动画', character_id, len(lib.names()))
+        # 后台预解码全部首帧：首次播放任一动画都不再有同步解码卡顿与旧帧残留
+        lib.warm_first_frames()
         return lib
 
     def _create_ui(self, character_id: str) -> None:
@@ -120,6 +176,7 @@ class PetApp:
         win.on_rescan_characters = self.rescan_characters
         win.on_locked_changed = self.sync_locked_action
         win.on_chat_requested = self.open_chat_input if self.has_chat() else None
+        win.on_speech_requested = self.say
         win.show()
 
         tray = self._build_tray(win)
@@ -137,6 +194,7 @@ class PetApp:
             if old_tray is not None:
                 QTimer.singleShot(0, old_tray.deleteLater)
 
+        self._attach_speech(win)
         self._attach_chat(win)
         self.app.aboutToQuit.connect(win._save_position)
 
@@ -168,6 +226,7 @@ class PetApp:
         win.on_rescan_characters = self.rescan_characters
         win.on_locked_changed = self.sync_locked_action
         win.on_chat_requested = self.open_chat_input if self.has_chat() else None
+        win.on_speech_requested = self.say
         win.show()
 
         tray = self._build_tray(win)
@@ -184,6 +243,7 @@ class PetApp:
         if old_tray is not None:
             QTimer.singleShot(0, old_tray.deleteLater)
 
+        self._attach_speech(win)
         self._attach_chat(win)
         self.app.aboutToQuit.connect(win._save_position)
 
@@ -212,6 +272,15 @@ class PetApp:
 
         menu = QMenu()
         menu.addAction('显示 / 隐藏', toggle_visible)
+
+        m_speech = menu.addMenu('自言自语')
+        speech_on = m_speech.addAction('开启气泡')
+        speech_on.setCheckable(True)
+        speech_on.setChecked(bool(self.config.get('speech_enabled', False)))
+        speech_on.toggled.connect(self.toggle_speech)
+        m_speech.addAction('立即说一句', self.say_now)
+        m_speech.addSeparator()
+        m_speech.addAction('设置…', self.open_speech_settings)
 
         if self.has_chat():
             m_chat = menu.addMenu('AI 对话')
@@ -300,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
     config = Config()
     _setup_logging(config)
     logging.info('dsh-pet-standalone 启动（版本: %s）', features.edition())
+    _check_ffmpeg_available()
 
     controller = PetApp(app, config)
     try:

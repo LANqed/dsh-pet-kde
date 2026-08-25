@@ -16,6 +16,7 @@ WebMClip 基于 imageio-ffmpeg 解码 640×360 透明 webm（RGBA）。
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Mapping
 
@@ -113,3 +114,35 @@ class MovieLibrary(QObject):
         """统一设置全部动画的播放速率（1.0 = 原速）。"""
         for clip in self._movies.values():
             clip.setSpeed(speed)
+
+    def warm_first_frames(self, names: list[str] | None = None) -> None:
+        """后台预解码首帧，消除首次播放任一动画时的同步解码卡顿与旧帧残留。
+
+        并发刻意压到 WARM_WORKERS（3）：ffmpeg 进程洪峰会拖慢启动，
+        在有安全软件的机器上还更容易被拦截。
+        """
+        targets = list(self._movies.keys() if names is None else names)
+        if not targets:
+            return
+
+        def worker(queue_slice: list[str]) -> None:
+            for name in queue_slice:
+                clip = self._movies.get(name)
+                if clip is None:
+                    continue
+                try:
+                    clip.warm_first_frame()
+                except Exception:  # 预热失败不影响运行，播放时会再试
+                    pass
+
+        workers = max(1, min(catalog.WARM_WORKERS, len(targets)))
+        chunks: list[list[str]] = [[] for _ in range(workers)]
+        for index, name in enumerate(targets):
+            chunks[index % workers].append(name)
+        for chunk in chunks:
+            if chunk:
+                threading.Thread(target=worker, args=(chunk,), daemon=True).start()
+
+    def decode_available(self) -> bool:
+        """是否至少有一段动画成功解码出首帧。"""
+        return any(not clip.decode_failed() for clip in self._movies.values())

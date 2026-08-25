@@ -35,6 +35,11 @@ class Config:
             'locked': False,  # 锁定：窗口完全鼠标穿透，只能从托盘解锁
             'speed': 1.0,  # 动画播放速率 1.0x ~ 2.0x
             'drag_physics': True,  # 拖动物理：松手抛出 + 重力 + 反弹衰减
+            'idle_gap': 0.0,  # 动作等待间隔（秒）：相邻非待机动画之间的间隔，0=连续
+            'speech_enabled': False,  # 随机自言自语气泡
+            'speech_min': catalog.SPEECH_MIN_SEC,
+            'speech_max': catalog.SPEECH_MAX_SEC,
+            'speech_lines': [],  # 自定义文本；留空使用内置
             'character': catalog.DEFAULT_CHARACTER,  # 当前形象 ID
         }
         self._load()

@@ -73,6 +73,8 @@ class FakeLibrary:
     def __init__(self) -> None:
         self._names = ["待机", "转身", "走路", "点击回应", "拖拽", "动作A"]
         self._clips = {n: FakeClip() for n in self._names}
+        # 真实 MovieLibrary 用 _movies；测试里复用其方法时需要同名属性
+        self._movies = self._clips
         self.manifest = {
             "idle": "待机",
             "turn": "转身",

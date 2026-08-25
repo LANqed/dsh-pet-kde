@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 THINKING_TEXT = '让我想想…'
 
 
+def _manifest_prompt(window) -> str:
+    """从角色 manifest.json 的 chat.system_prompt 取人设（可选字段）。"""
+    lib = getattr(window, 'lib', None)
+    manifest = getattr(lib, 'manifest', None)
+    if not isinstance(manifest, dict):
+        return ''
+    chat_section = manifest.get('chat')
+    if isinstance(chat_section, dict):
+        prompt = chat_section.get('system_prompt')
+        if isinstance(prompt, str):
+            return prompt
+    return ''
+
+
 class ChatController(QObject):
     """管理输入框、气泡与请求生命周期；跟随桌宠窗口移动。"""
 
@@ -43,6 +57,9 @@ class ChatController(QObject):
     # ---------------------------------------------------------- 绑定
     def attach(self, window) -> None:
         self._window = window
+        # 角色隔离：切换角色时清空历史并采用角色 manifest 的人设
+        character_id = str(getattr(window, 'cfg', None).get('character', '')) if getattr(window, 'cfg', None) else ''
+        self.client.set_character(character_id, _manifest_prompt(window))
 
     def detach(self) -> None:
         self._follow.stop()
@@ -65,7 +82,7 @@ class ChatController(QObject):
         if self._window is None:
             return
         # 先定位再 show：_reposition 只处理已可见的窗口，否则会停在 (0,0)
-        self.input.place_below(self._window.frameGeometry())
+        self.input.place_below(self._anchor_rect())
         self.input.show()
         self.input.raise_()
         self.input.activateWindow()
@@ -83,7 +100,7 @@ class ChatController(QObject):
             return
         self.bubble.set_text(text, auto_hide=auto_hide)
         # set_text 会改尺寸，定位必须在其后、show 之前
-        self.bubble.place_near(self._window.frameGeometry())
+        self.bubble.place_near(self._anchor_rect())
         self.bubble.show()
         self.bubble.raise_()
         self._follow.start()
@@ -93,7 +110,7 @@ class ChatController(QObject):
         self.say('好，我们从头聊。')
 
     def open_settings(self, parent=None) -> bool:
-        dialog = ChatSettingsDialog(self.settings, parent=parent)
+        dialog = ChatSettingsDialog(self.settings, client=self.client, parent=parent)
         accepted = bool(dialog.exec())
         if accepted and not self.settings.enabled():
             self.detach_ui_only()
@@ -125,10 +142,20 @@ class ChatController(QObject):
         window = self._window
         if window is None:
             return
-        rect = window.frameGeometry()
+        rect = self._anchor_rect()
         if self.bubble.isVisible():
             self.bubble.place_near(rect)
         if self.input.isVisible():
             self.input.place_below(rect)
         if not self.bubble.isVisible() and not self.input.isVisible():
             self._follow.stop()
+
+    def _anchor_rect(self):
+        """定位锚点：角色可见形象的包围盒，而不是带透明留白的窗口矩形。"""
+        window = self._window
+        if window is None:
+            return None
+        getter = getattr(window, 'visible_global_rect', None)
+        if getter is not None:
+            return getter()
+        return window.frameGeometry()

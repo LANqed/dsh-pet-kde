@@ -15,11 +15,13 @@ WebM-backed clip library（webm 主路线）。
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
+from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QObject, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 
 from . import catalog
 
@@ -35,6 +37,57 @@ except Exception as exc:  # pragma: no cover - 依赖缺失时无法使用 webm 
     _IMPORT_ERROR = exc
 else:
     _IMPORT_ERROR = None
+
+
+def ffmpeg_status() -> tuple[bool, str]:
+    """检查 ffmpeg 解码组件是否可用。
+
+    返回 (可用, 说明)。用于启动自检：若 ffmpeg 缺失或被安全软件隔离，
+    程序不崩溃，改为占位画面并提示用户。
+    """
+    if imageio_ffmpeg is None:
+        return False, f'imageio-ffmpeg 不可用：{_IMPORT_ERROR}'
+    try:
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        return False, f'找不到 ffmpeg 可执行文件：{exc}'
+    path = Path(exe)
+    # 系统 ffmpeg 通常在 PATH 上，用 which 结果也会落到这里
+    if not path.exists():
+        return False, f'ffmpeg 不存在（可能被安全软件隔离或已删除）：{exe}'
+    if not os.access(exe, os.X_OK):
+        return False, f'ffmpeg 没有可执行权限：{exe}'
+    return True, exe
+
+
+def placeholder_pixmap(label: str, width: int, height: int) -> QPixmap:
+    """解码不可用时的占位画面：半透明圆 + 角色首字，保证桌宠可见可交互。"""
+    image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    diameter = int(min(width, height) * 0.6)
+    left = (width - diameter) // 2
+    top = (height - diameter) // 2
+
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    painter.setPen(QPen(QColor(80, 130, 200, 180), 2))
+    painter.setBrush(QColor(140, 190, 245, 170))
+    painter.drawEllipse(left, top, diameter, diameter)
+
+    text = (label or '?').strip()[:1] or '?'
+    font = QFont()
+    font.setPixelSize(max(12, int(diameter * 0.5)))
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QColor(255, 255, 255, 230))
+    painter.drawText(
+        QRect(left, top, diameter, diameter),
+        int(Qt.AlignmentFlag.AlignCenter),
+        text,
+    )
+    painter.end()
+    return QPixmap.fromImage(image)
 
 
 class WebMClip(QObject):
@@ -70,9 +123,31 @@ class WebMClip(QObject):
         self._current_image: QImage | None = None
         self._current_pixmap: QPixmap | None = None
         self._first_image: QImage | None = None
+        self._first_lock = threading.Lock()   # warm_first_frame 与主线程共享 _first_image
+        self._decode_failed = False
         self._frame_index = 0
         self._ended_fired = False
         self._running = False
+
+    # ------------------------------------------------------------ 预热
+    def warm_first_frame(self) -> bool:
+        """后台预解码首帧（只产出 QImage，不触碰 QPixmap/QTimer，线程安全）。
+
+        QPixmap 只能在 GUI 线程构造，所以这里只缓存 QImage；
+        jumpToFrame(0) 在主线程用缓存直接建 QPixmap，零同步解码卡顿。
+        """
+        with self._first_lock:
+            if self._first_image is not None:
+                return True
+        image = self._decode_first_image()
+        if image is None:
+            return False
+        with self._first_lock:
+            self._first_image = image
+        return True
+
+    def decode_failed(self) -> bool:
+        return self._decode_failed
 
     # ------------------------------------------------------------ metadata
     def _ensure_meta(self) -> None:
@@ -177,18 +252,24 @@ class WebMClip(QObject):
         if frame_index <= 0:
             self.stop()
             self._frame_index = 0
-            if self._first_image is None:
-                self._decode_first_frame_sync()
-            else:
-                self._current_image = self._first_image.copy()
+            with self._first_lock:
+                cached = self._first_image
+            if cached is None:
+                # 未预热成功：退回同步解码（GUI 线程，可能有短暂卡顿）
+                if self.warm_first_frame():
+                    with self._first_lock:
+                        cached = self._first_image
+            if cached is not None:
+                self._current_image = cached.copy()
                 self._current_pixmap = QPixmap.fromImage(self._current_image)
             return True
         return False
 
-    def _decode_first_frame_sync(self) -> None:
-        """同步解码首帧，保证 jumpToFrame(0)/currentPixmap 在 start() 前有画面。"""
+    def _decode_first_image(self) -> QImage | None:
+        """解码首帧为 QImage；顺带补齐 fps/duration 元数据。失败返回 None。"""
         if imageio_ffmpeg is None:
-            return
+            self._decode_failed = True
+            return None
         gen = None
         try:
             gen = imageio_ffmpeg.read_frames(
@@ -206,15 +287,21 @@ class WebMClip(QObject):
             if self._frame_count <= 0 and self._fps > 0 and self._duration > 0:
                 self._frame_count = int(round(self._fps * self._duration))
             expect = self._w * self._h * self._bpp
-            if len(frame) == expect:
-                img = QImage(frame, self._w, self._h, self._w * self._bpp,
-                             QImage.Format.Format_RGBA8888)
-                if not img.isNull():
-                    self._current_image = img.copy()
-                    self._first_image = self._current_image.copy()
-                    self._current_pixmap = QPixmap.fromImage(self._current_image)
+            if len(frame) != expect:
+                self._decode_failed = True
+                return None
+            img = QImage(frame, self._w, self._h, self._w * self._bpp,
+                         QImage.Format.Format_RGBA8888)
+            if img.isNull():
+                self._decode_failed = True
+                return None
+            self._decode_failed = False
+            return img.copy()
         except Exception as exc:
+            # ffmpeg 被安全软件隔离/删除时会走到这里，不能让它冒泡成崩溃
             logger.warning('webm 首帧预解码失败 %s: %s', self.path, exc)
+            self._decode_failed = True
+            return None
         finally:
             if gen is not None:
                 try:

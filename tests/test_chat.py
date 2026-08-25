@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 
 import pytest
@@ -116,10 +117,47 @@ def _http_error(code: int) -> urllib.error.HTTPError:
 
 @pytest.mark.parametrize(
     "code,fragment",
-    [(401, "API key"), (404, "404"), (429, "429"), (500, "HTTP 500")],
+    [
+        (401, "API key"),
+        (403, "API key"),
+        (402, "余额不足"),
+        (404, "404"),
+        (429, "429"),
+        (500, "服务端故障"),
+        (503, "服务端故障"),
+        (418, "HTTP 418"),
+    ],
 )
 def test_http_error_messages(code, fragment):
     assert fragment in chat_mod._friendly_error(_http_error(code))
+
+
+def test_ssl_cert_error_carries_hint():
+    import ssl
+
+    exc = ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED")
+    message = chat_mod._friendly_error(exc)
+    assert "证书校验失败" in message
+    assert "跳过 SSL 证书验证" in message
+
+
+def test_url_error_wrapping_ssl_reports_cert_hint():
+    import ssl
+
+    exc = urllib.error.URLError(ssl.SSLCertVerificationError("bad cert"))
+    message = chat_mod._friendly_error(exc)
+    assert "证书校验失败" in message
+    assert "跳过 SSL 证书验证" in message
+
+
+def test_build_ssl_context_modes():
+    import ssl
+
+    assert chat_mod.build_ssl_context(True) is None
+    context = chat_mod.build_ssl_context(False)
+    assert context is not None
+    assert context.check_hostname is False
+    assert context.verify_mode == ssl.CERT_NONE
 
 
 def test_url_error_message():
@@ -223,6 +261,136 @@ def test_failed_request_reports_and_clears_busy(qapp, settings, monkeypatch):
     client._worker(gen, "问题", [])
     assert errors and "网络无法连接" in errors[0]
     assert client.is_busy() is False
+
+
+# ---------------------------------------------------------------- 角色隔离
+def test_set_character_clears_history(qapp, settings):
+    client = chat_mod.ChatClient(settings)
+    client._history = [{"role": "user", "content": "旧角色消息"}]
+    client.set_character("new-char", "你是新角色")
+    assert client.history() == []
+    assert client.character_id() == "new-char"
+
+
+def test_same_character_keeps_history(qapp, settings):
+    client = chat_mod.ChatClient(settings)
+    client.set_character("same", "人设A")
+    client._history = [{"role": "user", "content": "保留"}]
+    client.set_character("same", "人设A")
+    assert client.history() == [{"role": "user", "content": "保留"}]
+
+
+def test_prompt_priority_user_over_manifest(qapp, settings):
+    client = chat_mod.ChatClient(settings)
+    client.set_character("c", "角色人设")
+    settings.set("system_prompt", "用户人设")
+    assert client.effective_system_prompt() == "用户人设"
+
+
+def test_prompt_falls_back_to_manifest(qapp, settings):
+    client = chat_mod.ChatClient(settings)
+    client.set_character("c", "角色人设")
+    settings.set("system_prompt", chat_mod.DEFAULT_SYSTEM_PROMPT)
+    assert client.effective_system_prompt() == "角色人设"
+
+
+def test_prompt_defaults_when_nothing_set(qapp, settings):
+    client = chat_mod.ChatClient(settings)
+    settings.set("system_prompt", chat_mod.DEFAULT_SYSTEM_PROMPT)
+    assert client.effective_system_prompt() == chat_mod.DEFAULT_SYSTEM_PROMPT
+
+
+def test_explicit_empty_prompt_is_respected(qapp, settings):
+    client = chat_mod.ChatClient(settings)
+    settings.set("system_prompt", "")
+    assert client.effective_system_prompt() == ""
+
+
+# ---------------------------------------------------------------- 生成参数
+def test_temperature_and_max_tokens_clamped(settings):
+    settings.set("temperature", 9.0)
+    assert settings.temperature() == 2.0
+    settings.set("temperature", -1.0)
+    assert settings.temperature() == 0.0
+    settings.set("max_tokens", 999999)
+    assert settings.max_tokens() == 32768
+    settings.set("max_tokens", -5)
+    assert settings.max_tokens() == 0
+
+
+def test_invalid_numbers_fall_back_to_defaults(settings):
+    settings.set("temperature", "abc")
+    assert settings.temperature() == chat_mod.DEFAULT_TEMPERATURE
+    settings.set("max_tokens", None)
+    assert settings.max_tokens() == chat_mod.DEFAULT_MAX_TOKENS
+    settings.set("timeout", "oops")
+    assert settings.timeout() == float(chat_mod.DEFAULT_TIMEOUT)
+
+
+def test_verify_ssl_roundtrip(tmp_path):
+    settings = chat_mod.ChatSettings(tmp_path)
+    assert settings.verify_ssl() is True
+    settings.set("verify_ssl", False)
+    settings.save()
+    assert chat_mod.ChatSettings(tmp_path).verify_ssl() is False
+
+
+# ---------------------------------------------------------------- 连通性测试
+def test_test_connection_requires_base_url(qapp, settings):
+    settings.set("base_url", "")
+    client = chat_mod.ChatClient(settings)
+    results = []
+    assert client.test_connection(lambda ok, msg: results.append((ok, msg))) is False
+    assert results and results[0][0] is False
+
+
+def test_test_connection_reports_failure(qapp, settings, monkeypatch):
+    settings.set("base_url", "https://x.test/v1")
+    client = chat_mod.ChatClient(settings)
+
+    def boom(messages, max_tokens=None, timeout=None):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(client, "_request", boom)
+    results = []
+    assert client.test_connection(lambda ok, msg: results.append((ok, msg))) is True
+
+    deadline = time.time() + 5
+    while time.time() < deadline and not results:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert results and results[0][0] is False
+    assert "网络无法连接" in results[0][1]
+
+
+def test_test_connection_reports_success(qapp, settings, monkeypatch):
+    settings.set("base_url", "https://x.test/v1")
+    client = chat_mod.ChatClient(settings)
+    monkeypatch.setattr(
+        client, "_request", lambda messages, max_tokens=None, timeout=None: "pong"
+    )
+    results = []
+    client.test_connection(lambda ok, msg: results.append((ok, msg)))
+    deadline = time.time() + 5
+    while time.time() < deadline and not results:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert results and results[0][0] is True
+    assert "连接正常" in results[0][1]
+
+
+def test_repeated_test_connection_does_not_crash(qapp, settings, monkeypatch):
+    """反复点击「测试连接」不应崩溃（不用 QThread，改 daemon 线程 + 信号）。"""
+    settings.set("base_url", "https://x.test/v1")
+    client = chat_mod.ChatClient(settings)
+    monkeypatch.setattr(
+        client, "_request", lambda messages, max_tokens=None, timeout=None: "ok"
+    )
+    for _ in range(5):
+        client.test_connection(lambda ok, msg: None)
+        qapp.processEvents()
+        time.sleep(0.05)
+    assert True  # 没有崩溃即通过
 
 
 # ---------------------------------------------------------------- 可选模块

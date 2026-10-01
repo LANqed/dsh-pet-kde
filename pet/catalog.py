@@ -62,6 +62,9 @@ SCALE_STEPS = (0.5, 0.72, 0.85, 1.0)
 # ---------------------------------------------------------------- 交互物理
 # Q 弹 / 拖动物理的驱动步长（约 60fps）
 ANIM_TICK_MS = 16
+# 拖拽合帧消费频率：高刷屏上 mouseMoveEvent 可能远高于 60Hz，
+# 只消费最新目标，避免逐事件 move 造成抖动。
+DRAG_TICK_MS = 8
 
 # 点击 Q 弹：先变矮再复原的阻尼振荡
 SQUASH_AMPLITUDE = 0.18    # 初始压缩比（高度 -18%）
@@ -72,13 +75,13 @@ SQUASH_DURATION = 0.55     # 总时长（秒）
 
 # 拖动物理：松手抛出 + 重力 + 边界反弹衰减
 GRAVITY = 2600.0           # px/s²
-GROUND_BOUNCE = 0.42       # 触地后垂直速度保留比
-WALL_BOUNCE = 0.50         # 撞墙后水平速度保留比
-GROUND_FRICTION = 0.72     # 触地水平摩擦
-AIR_DRAG = 0.992           # 每步空气阻力
-SETTLE_SPEED = 45.0        # 判定静止的速度阈值（px/s）
-THROW_MIN_SPEED = 120.0    # 低于该速度视为轻放，不抛出
-THROW_MAX_SPEED = 3200.0   # 抛出速度上限
+GROUND_BOUNCE = 0.68       # 触地后垂直速度保留比（更弹）
+WALL_BOUNCE = 0.72         # 撞墙后水平速度保留比（更弹）
+GROUND_FRICTION = 0.88     # 触地水平摩擦（少损失横向速度）
+AIR_DRAG = 0.996           # 每步空气阻力
+SETTLE_SPEED = 28.0        # 判定静止的速度阈值（px/s）
+THROW_MIN_SPEED = 90.0     # 低于该速度视为轻放，不抛出
+THROW_MAX_SPEED = 4200.0   # 抛出速度上限
 VELOCITY_WINDOW_SEC = 0.09 # 松手速度的采样窗口（秒）
 
 # 拖拽 / 飞行时的倾斜（惯性、离心感）

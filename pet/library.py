@@ -17,6 +17,7 @@ WebMClip 基于 imageio-ffmpeg 解码 640×360 透明 webm（RGBA）。
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Mapping
 
@@ -48,6 +49,10 @@ class MovieLibrary(QObject):
         self.folder_map: dict[str, str] | None = {}
         self.folder_files: dict[str, list[str]] | None = {}
         self._movies: dict[str, WebMClip] = {}
+        self._warm_lock = threading.Condition()
+        self._warm_paused = 0
+        self._warm_generation = 0
+        self._warm_thread: threading.Thread | None = None
 
         self._load_all()
 
@@ -125,23 +130,72 @@ class MovieLibrary(QObject):
         if not targets:
             return
 
-        def worker(queue_slice: list[str]) -> None:
-            for name in queue_slice:
-                clip = self._movies.get(name)
-                if clip is None:
-                    continue
-                try:
-                    clip.warm_first_frame()
-                except Exception:  # 预热失败不影响运行，播放时会再试
-                    pass
+        self._ensure_warm_state()
 
-        workers = max(1, min(catalog.WARM_WORKERS, len(targets)))
-        chunks: list[list[str]] = [[] for _ in range(workers)]
-        for index, name in enumerate(targets):
-            chunks[index % workers].append(name)
-        for chunk in chunks:
-            if chunk:
-                threading.Thread(target=worker, args=(chunk,), daemon=True).start()
+        with self._warm_lock:
+            self._warm_generation += 1
+            generation = self._warm_generation
+
+        def worker() -> None:
+            # 固定 worker 数，且每段解码前等待交互闸门；暂停不忙循环。
+            pending = list(targets)
+            pending_lock = threading.Lock()
+
+            def consume() -> None:
+                while True:
+                    with self._warm_lock:
+                        while self._warm_paused > 0 and generation == self._warm_generation:
+                            self._warm_lock.wait()
+                        if generation != self._warm_generation:
+                            return
+                    with pending_lock:
+                        if not pending:
+                            return
+                        name = pending.pop(0)
+                    clip = self._movies.get(name)
+                    if clip is None:
+                        continue
+                    try:
+                        clip.warm_first_frame()
+                    except Exception:  # 预热失败不影响运行，播放时会再试
+                        pass
+
+            threads = [
+                threading.Thread(target=consume, daemon=True)
+                for _ in range(max(1, min(catalog.WARM_WORKERS, len(targets))))
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        thread = threading.Thread(target=worker, daemon=True)
+        self._warm_thread = thread
+        thread.start()
+
+    def pause_warmup(self) -> None:
+        """暂停低优先级首帧预热；可嵌套调用。"""
+        self._ensure_warm_state()
+        with self._warm_lock:
+            self._warm_paused += 1
+
+    def resume_warmup(self) -> None:
+        """释放一次预热暂停闸门。"""
+        self._ensure_warm_state()
+        with self._warm_lock:
+            if self._warm_paused > 0:
+                self._warm_paused -= 1
+            if self._warm_paused == 0:
+                self._warm_lock.notify_all()
+
+    def _ensure_warm_state(self) -> None:
+        """为轻量测试库/旧嵌入调用方延迟初始化预热状态。"""
+        if hasattr(self, '_warm_lock'):
+            return
+        self._warm_lock = threading.Condition()
+        self._warm_paused = 0
+        self._warm_generation = 0
+        self._warm_thread = None
 
     def decode_available(self) -> bool:
         """是否至少有一段动画成功解码出首帧。"""

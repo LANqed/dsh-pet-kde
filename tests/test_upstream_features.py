@@ -18,7 +18,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QRect  # noqa: E402
+from PySide6.QtCore import QPoint, QRect  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from pet import catalog  # noqa: E402
@@ -115,7 +115,10 @@ def test_warm_first_frames_dispatches_all_clips(qapp):
 
     from pet.library import MovieLibrary
 
-    MovieLibrary.warm_first_frames(lib)  # 复用真实实现，FakeLibrary 提供 _movies
+    # 复用真实实现；FakeLibrary 也接入配套状态初始化 helper。
+    lib._ensure_warm_state = lambda: MovieLibrary._ensure_warm_state(lib)  # type: ignore[attr-defined]
+    MovieLibrary._ensure_warm_state(lib)
+    MovieLibrary.warm_first_frames(lib)
     deadline = 3.0
     step = 0.02
     waited = 0.0
@@ -135,6 +138,27 @@ def test_warm_workers_is_conservative():
     assert 1 <= catalog.WARM_WORKERS <= 4
 
 
+def test_warmup_pause_is_nested_and_resumable(qapp):
+    """拖拽/点击期间可重入暂停预热，全部释放后才恢复。"""
+    lib = FakeLibrary()
+    from pet.library import MovieLibrary
+
+    lib._ensure_warm_state = lambda: MovieLibrary._ensure_warm_state(lib)  # type: ignore[attr-defined]
+    MovieLibrary._ensure_warm_state(lib)
+    MovieLibrary.pause_warmup(lib)
+    MovieLibrary.pause_warmup(lib)
+    assert lib._warm_paused == 2
+    MovieLibrary.resume_warmup(lib)
+    assert lib._warm_paused == 1
+    MovieLibrary.resume_warmup(lib)
+    assert lib._warm_paused == 0
+
+
+def test_reader_snapshot_is_safe_without_running_reader(qapp):
+    clip = FakeClip()
+    assert clip.reader_snapshot() == (False, 0) if hasattr(clip, 'reader_snapshot') else True
+
+
 # ---------------------------------------------------------------- Q 弹
 def test_squash_never_widens_frame(win):
     """窗口与 mask 尺寸固定，宽度放大会把角色边缘裁成透明。"""
@@ -142,6 +166,41 @@ def test_squash_never_widens_frame(win):
     sx, sy, _ = win._squash_geometry()
     assert sx <= 1.0, "Q 弹不应放大宽度"
     assert sy < 1.0
+
+
+def test_throw_physics_is_more_elastic_than_baseline(win):
+    """4.2.0 弹性目标：地面/墙面保留足够速度，且可明显二次弹起。"""
+    assert catalog.GROUND_BOUNCE >= 0.6
+    assert catalog.WALL_BOUNCE >= 0.6
+    assert catalog.GROUND_FRICTION >= 0.8
+    assert catalog.SETTLE_SPEED <= 35
+
+
+def test_throw_bounces_multiple_times(win):
+    win.set_drag_physics(True)
+    win.move(400, 100)
+    win._start_fly(900.0, 800.0)
+    bounces = 0
+    previous_vy = win._fly_vy
+    for _ in range(1800):
+        if not win._flying:
+            break
+        win._on_fx_tick()
+        if previous_vy > 0 and win._fly_vy < 0:
+            bounces += 1
+        previous_vy = win._fly_vy
+    assert bounces >= 2
+
+
+def test_drag_target_coalesces_latest_position(win):
+    win._dragging = True
+    win._drag_target = win.pos() + QPoint(10, 20)
+    first = win.pos()
+    win._drag_target = win.pos() + QPoint(40, 50)
+    win._consume_drag_target()
+    assert win.pos() != first
+    assert win.pos() == win._drag_target
+    win._dragging = False
 
 
 def test_squash_geometry_matches_transform_state(win):

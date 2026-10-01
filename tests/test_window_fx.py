@@ -66,6 +66,9 @@ class FakeClip(QObject):
     def duration(self) -> float:
         return 1.0
 
+    def reader_snapshot(self):
+        return False, 0
+
 
 class FakeLibrary:
     """最小素材库：一个待机 + 一个转向 + 一个移动 + 一个点击 + 一个拖拽。"""

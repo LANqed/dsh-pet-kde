@@ -129,6 +129,13 @@ class PetWindow(QWidget):
         self._fx_timer.setInterval(catalog.ANIM_TICK_MS)
         self._fx_timer.timeout.connect(self._on_fx_tick)
 
+        # 拖拽合帧：mouseMoveEvent 只记录最新目标，由 125Hz timer 消费。
+        self._drag_target: QPoint | None = None
+        self._drag_timer = QTimer(self)
+        self._drag_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._drag_timer.setInterval(catalog.DRAG_TICK_MS)
+        self._drag_timer.timeout.connect(self._consume_drag_target)
+
         # 置顶自检：合成器重启/分辨率变更/休眠唤醒后置顶可能被丢弃
         self._topmost_timer = QTimer(self)
         self._topmost_timer.setInterval(catalog.TOPMOST_CHECK_MS)
@@ -792,8 +799,10 @@ class PetWindow(QWidget):
             self._dragging = False
             self._cancel_move()  # 按下即打断移动
             self._stop_fly()     # 抓住正在飞的桌宠
+            self.lib.pause_warmup()
             self._samples = []
             self._record_sample(self._press_global)
+            self._drag_target = None
             event.accept()
         else:
             super().mousePressEvent(event)
@@ -809,12 +818,22 @@ class PetWindow(QWidget):
             self._dragging = True
             if self.drag:
                 self._switch(self.drag)  # 进入拖拽：播放悬空反馈动画
-        self.move(g - self._grab_offset)  # 跟手（保持抓起时的偏移）
+        self._drag_target = QPoint(g - self._grab_offset)  # 只保留最新目标
+        if not self._drag_timer.isActive():
+            self._drag_timer.start()
         self._record_sample(g)
         if self.drag_physics:
             vx, _ = self._drag_velocity()
             self._update_lean(vx)   # 拖拽过程中的惯性/离心倾斜
         event.accept()
+
+    def _consume_drag_target(self) -> None:
+        """消费最新拖拽目标，避免高刷屏逐事件 move 造成抖动。"""
+        target = self._drag_target
+        if target is None or not self._dragging:
+            return
+        self.move(target)
+        self.update()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
@@ -843,6 +862,10 @@ class PetWindow(QWidget):
         elif dist < catalog.DRAG_THRESHOLD * self.scale:
             self._on_click()
         self._dragging = False
+        self._consume_drag_target()
+        self._drag_timer.stop()
+        self._drag_target = None
+        self.lib.resume_warmup()
         self._samples = []
         self._mask_initialized = False
         self._sync_mask()
@@ -1060,6 +1083,7 @@ class PetWindow(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._fx_timer.stop()
+        self._drag_timer.stop()
         self._topmost_timer.stop()
         self._save_position()
         super().closeEvent(event)

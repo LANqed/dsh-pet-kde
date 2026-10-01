@@ -116,6 +116,8 @@ class WebMClip(QObject):
         self._queue: queue.Queue = queue.Queue(maxsize=8)
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
+        self._retired_threads: list[tuple[threading.Thread, threading.Event]] = []
+        self._reader_lock = threading.Lock()
         self._timer = QTimer(self)
         self._timer.setInterval(self._timer_interval())
         self._timer.timeout.connect(self._poll)
@@ -222,6 +224,7 @@ class WebMClip(QObject):
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
+        self.cleanup_readers()
         if self._running:
             return
         if imageio_ffmpeg is None:
@@ -243,9 +246,35 @@ class WebMClip(QObject):
     def stop(self) -> None:
         self._running = False
         self._timer.stop()
-        self._stop_evt.set()
-        # 不 join：reader 是 daemon 线程，避免切换动画时阻塞 UI 造成卡顿
+        old_thread = self._thread
+        old_stop = self._stop_evt
+        old_stop.set()
         self._thread = None
+        if old_thread is not None and old_thread.is_alive():
+            # 短等让正常 reader 收尾；卡死线程保留追踪，下一次 start/cleanup 再收。
+            old_thread.join(timeout=0.12)
+            if old_thread.is_alive():
+                with self._reader_lock:
+                    self._retired_threads.append((old_thread, old_stop))
+                    self._retired_threads = self._retired_threads[-2:]
+
+    def cleanup_readers(self) -> None:
+        """回收已停止 reader；不丢弃仍存活的追踪记录。"""
+        with self._reader_lock:
+            retired = list(self._retired_threads)
+        alive: list[tuple[threading.Thread, threading.Event]] = []
+        for thread, stop_evt in retired:
+            stop_evt.set()
+            thread.join(timeout=0.05)
+            if thread.is_alive():
+                alive.append((thread, stop_evt))
+        with self._reader_lock:
+            self._retired_threads = alive[-2:]
+
+    def reader_snapshot(self) -> tuple[bool, int]:
+        """返回 (当前 reader 是否存活, 退役 reader 数)，供诊断/测试使用。"""
+        self.cleanup_readers()
+        return bool(self._thread and self._thread.is_alive()), len(self._retired_threads)
 
     def jumpToFrame(self, frame_index: int) -> bool:
         # 本项目只需要回到首帧；完整 seek 通过重启 reader + 丢弃帧实现。

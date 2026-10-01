@@ -24,6 +24,8 @@ from . import autostart as autostart_mod
 from . import catalog
 from . import features
 from . import webm_clip
+from .dsh_events import DshEventWatcher
+from .music import MusicService
 from .config import Config
 from .kde import configure_platform
 from .library import MovieLibrary
@@ -75,6 +77,16 @@ class PetApp:
         self.tray: QSystemTrayIcon | None = None
         self._locked_action = None  # 托盘「锁定」项，用于反向同步勾选状态
         self.speech: SpeechScheduler | None = None
+        self.music = MusicService(parent=app)
+        self.dsh = DshEventWatcher(parent=app)
+        self._music_timer = QTimer(app)
+        self._music_timer.setInterval(1500)
+        self._music_timer.timeout.connect(self._poll_music)
+        self.music.trackChanged.connect(self._on_track_changed)
+        self.music.lyricsReady.connect(self._on_lyrics_ready)
+        self.dsh.stateChanged.connect(self._on_dsh_state)
+        self._lyrics_lines = []
+        self._lyrics_text = ''
         self.chat = self._create_chat_controller()
 
     # ------------------------------------------------------------ AI 对话
@@ -161,6 +173,66 @@ class PetApp:
             self.config.save()
         logging.info('当前形象: %s', character_id)
         self._create_ui(character_id)
+        # 即使启动时没有播放，也持续低频轮询，避免用户稍后开始播放后
+        # 服务永远不知道新曲目；没有 playerctl 时 poll 会静默返回。
+        self.music.poll()
+        self._music_timer.start()
+        self.dsh.start()
+
+    def _poll_music(self) -> None:
+        self.music.poll()
+
+    def _on_track_changed(self, track) -> None:
+        if track is None:
+            self._lyrics_lines = []
+            self._lyrics_text = ''
+            return
+        if track.title:
+            self.say(f'正在播放：{track.query}')
+
+    def _on_lyrics_ready(self, track, lines) -> None:
+        self._lyrics_lines = list(lines)
+        self._lyrics_text = ''
+
+    def show_lyrics(self) -> None:
+        track = self.music.track or self.music.poll()
+        if track is None:
+            self.say('当前没有检测到 MPRIS 播放器。')
+            return
+        if not self._lyrics_lines:
+            if not self.music.fetch_lyrics():
+                self.say('歌词正在获取，稍后再试。')
+                return
+            self.say(f'正在获取歌词：{track.query}')
+            return
+        text = self._current_lyric_text(track.position)
+        self.say(text or '当前没有匹配到歌词。')
+
+    def _current_lyric_text(self, position: float) -> str:
+        current = ''
+        for timestamp, text in self._lyrics_lines:
+            if timestamp > position:
+                break
+            current = text
+        return current
+
+    def lyric_align(self, seconds: float) -> None:
+        from .music import seek_absolute, seek_relative
+        if seconds == 0:
+            seek_absolute(0)
+        else:
+            seek_relative(seconds)
+
+    def _on_dsh_state(self, state: str, message: str) -> None:
+        """把可选 DSH 状态映射到桌宠动画/气泡。"""
+        if self.win is None:
+            return
+        if state == 'working' and self.win.acts:
+            self.win._switch(self.win._pick(self.win.acts))
+        elif state == 'thinking' and self.win.idles:
+            self.win._switch(self.win._pick(self.win.idles))
+        if message:
+            self.say(message)
 
     def _create_library(self, character_id: str) -> MovieLibrary:
         lib = MovieLibrary(character_id=character_id)
@@ -281,6 +353,14 @@ class PetApp:
         m_speech.addAction('立即说一句', self.say_now)
         m_speech.addSeparator()
         m_speech.addAction('设置…', self.open_speech_settings)
+
+        m_music = menu.addMenu('音乐 / 歌词')
+        m_music.addAction('显示当前歌词', self.show_lyrics)
+        m_music.addAction('重新获取歌词', self.music.fetch_lyrics)
+        m_music.addSeparator()
+        m_music.addAction('回到开头', lambda: self.lyric_align(0))
+        m_music.addAction('上一句（后退 5 秒）', lambda: self.lyric_align(-5))
+        m_music.addAction('下一句（前进 5 秒）', lambda: self.lyric_align(5))
 
         if self.has_chat():
             m_chat = menu.addMenu('AI 对话')

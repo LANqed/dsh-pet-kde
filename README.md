@@ -104,6 +104,8 @@ Windows 与 macOS 请使用原项目发布的安装包：**[MerZlin/dsh-pet-inde
 - 系统托盘：显示/隐藏、自言自语、锁定、切换角色、拖动物理、播放速度、开机自启、退出
 - 自动持久化：位置、朝向、缩放、置顶、移动开关、锁定、播放速率、拖动物理、动作等待间隔、自言自语设置、当前角色
 - **AI 对话（仅 Chat 版）**：头顶气泡对话，跟随桌宠移动；接任意 OpenAI 兼容接口，支持人设提示、多轮上下文、温度与最大输出、SSL 校验开关与连通性测试
+- **Linux 音乐/歌词**：通过 `playerctl` 读取 MPRIS 播放器（VLC、Spotify、浏览器等），通过 LRCLIB 获取同步歌词；支持显示当前歌词、重新获取、回到开头、前后对齐。
+- **Linux DSH 联动**：设置 `DSH_PET_EVENTS=/path/to/events.jsonl` 后监听 JSONL 事件，支持 thinking / working / attention / error / idle 状态映射。
 
 ## 使用
 
